@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.0.5"
+  project_version: "v3.0.6"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -198,25 +198,34 @@ remote_receiver:
       number: ${RF_RX_PIN}
       inverted: true
     dump: rc_switch
-    # RF433 fixed-code decoding: filter glitches, split frames on 4ms idle,
-    # and widen tolerance for cheap remotes. rc_switch decoding rejects the
-    # receiver's ambient noise, so learning no longer false-triggers.
+    # RF433 raw decoding: filter glitches, split frames on 4ms idle, and
+    # widen tolerance for cheap remotes so learning doesn't false-trigger.
+    # dump: rc_switch is log-only (useful for diagnostics) and has no effect
+    # on which triggers fire.
     filter: 4us
     idle: 4ms
     tolerance: 50%
     id: rf_receiver
-    on_rc_switch:
+    # Learn raw timing (like IR) rather than decoding via rc_switch, so any
+    # OOK remote can be learned regardless of protocol/bit-length, and
+    # playback replays the exact captured signal instead of guessing a bit
+    # count. Slots store a leading tag byte to stay compatible with signals
+    # learned by older firmware: 0 = raw capture (mark/space ints follow),
+    # 1-8 = legacy rc_switch protocol id (see send_raw_rf_signal below).
+    on_raw:
       - lambda: |-
           if (id(is_rf_learning_mode)) {
-            std::vector<int> d;
-            d.push_back((int) x.protocol);
-            d.push_back((int) (x.code >> 32));
-            d.push_back((int) (x.code & 0xFFFFFFFF));
-            id(signal_nvs).save_to_nvs(id(rf_signal_select_index), d);
-            ESP_LOGI("RF_LEARNING", "Learned protocol=%u code=%llu slot=%d",
-                     x.protocol, (unsigned long long) x.code, id(rf_signal_select_index));
-            id(is_rf_learning_mode) = false;
-            id(rf_status_text).publish_state("Signal learned!");
+            if (x.size() > id(filter_size)) {
+              std::vector<int> d;
+              d.push_back(0);
+              for (auto v : x) d.push_back((int) v);
+              id(signal_nvs).save_to_nvs(id(rf_signal_select_index), d);
+              ESP_LOGI("RF_LEARNING", "Signal saved to slot %d, size: %d", id(rf_signal_select_index), x.size());
+              id(is_rf_learning_mode) = false;
+              id(rf_status_text).publish_state("Signal learned!");
+            } else {
+              ESP_LOGW("RF_LEARNING", "Signal too short: %d", x.size());
+            }
           }
 
   - pin:
@@ -529,21 +538,42 @@ script:
             id(status_text).publish_state("No signal in this slot");
           }
 
-  # Script for sending learned RF433 rc_switch signals
+  # Script for sending learned RF433 signals. Slots learned by older
+  # firmware are a bare [protocol, code_high, code_low] legacy rc_switch
+  # tuple (protocol always 1-8); slots learned since the raw-capture
+  # rewrite are tagged [0, mark0, space0, mark1, ...] and replayed as raw
+  # timing, same as IR. The tag can't collide with a legacy protocol id.
   - id: send_raw_rf_signal
     then:
-      # Load [protocol, code_high, code_low] from NVS and rebuild the 64-bit code
-      # into the temp globals that transmit_rc_switch_raw reads via !lambda.
       - lambda: |-
           std::vector<int> d = id(signal_nvs).load_from_nvs<int>(id(rf_signal_select_index));
-          if (d.size() >= 3) {
+          id(rf_tx_protocol) = 0;
+          if (d.size() == 3 && d[0] >= 1 && d[0] <= 8) {
+            // Legacy rc_switch tuple: rebuild the 64-bit code into the temp
+            // globals that transmit_rc_switch_raw reads via !lambda below.
             id(rf_tx_protocol) = d[0];
             id(rf_tx_code) = ((uint64_t) (uint32_t) d[1] << 32) | (uint32_t) d[2];
             ESP_LOGI("RF_SEND", "Sending protocol=%d code=%llu slot=%d",
                      id(rf_tx_protocol), (unsigned long long) id(rf_tx_code), id(rf_signal_select_index));
             id(rf_status_text).publish_state("Sending signal...");
+          } else if (d.size() > 1 && d[0] == 0) {
+            // Raw capture: replay the exact timing, repeated for reliability.
+            ESP_LOGI("RF_SEND", "Sending raw signal, size: %d, slot=%d", d.size() - 1, id(rf_signal_select_index));
+            id(rf_status_text).publish_state("Sending signal...");
+            for (int r = 0; r < 5; r++) {
+              auto transmit = id(rf_transmitter).transmit();
+              auto data = transmit.get_data();
+              for (size_t i = 1; i < d.size(); i++) {
+                if ((i - 1) % 2 == 0) {
+                  data->mark(d[i]);
+                } else {
+                  data->space(d[i]);
+                }
+              }
+              transmit.perform();
+            }
+            id(rf_status_text).publish_state("Signal sent!");
           } else {
-            id(rf_tx_protocol) = 0;
             ESP_LOGW("RF_SEND", "No signal stored in slot %d", id(rf_signal_select_index));
             id(rf_status_text).publish_state("No signal in this slot");
           }
@@ -554,9 +584,11 @@ script:
             - remote_transmitter.transmit_rc_switch_raw:
                 # protocol must be an RCSwitchBase: index the built-in table (1..8)
                 protocol: !lambda 'return esphome::remote_base::RC_SWITCH_PROTOCOLS[id(rf_tx_protocol)];'
-                # code must be an MSB-first binary string; its length is the bit count.
-                # on_rc_switch does not expose the received bit length, and virtually
-                # all 433MHz fixed-code remotes (EV1527/PT2262/…) are 24-bit.
+                # Legacy-slot playback only (see send_raw_rf_signal above); new slots
+                # never reach this step. code must be an MSB-first binary string; its
+                # length is the bit count. on_rc_switch never exposed the received bit
+                # length, so this assumes 24 bits, true for most EV1527/PT2262 remotes
+                # but not guaranteed — kept as-is so already-learned slots keep working.
                 code: !lambda |-
                   uint64_t code = id(rf_tx_code);
                   const int nbits = 24;
