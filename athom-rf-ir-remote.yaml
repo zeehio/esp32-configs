@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.0.7"
+  project_version: "v3.0.8"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -104,6 +104,14 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
+  # Holds the most recent not-yet-confirmed RF433 raw capture during
+  # learning; a signal is only saved once the same capture is seen twice
+  # in a row (within tolerance), so a single burst of ambient noise can't
+  # get learned as if it were a real button press.
+  - id: rf_learn_candidate
+    type: std::vector<int>
+    restore_value: no
+    initial_value: 'std::vector<int>()'
 
 # Flash storage component for saving IR signals
 Flash_comp:
@@ -216,17 +224,44 @@ remote_receiver:
     # count. Slots store a leading tag byte to stay compatible with signals
     # learned by older firmware: 0 = raw capture (mark/space ints follow),
     # 1-8 = legacy rc_switch protocol id (see send_raw_rf_signal below).
+    #
+    # A single reception clearing the length filter isn't enough to trust:
+    # ambient RF noise routinely produces bursts well past filter_size with
+    # no button pressed at all. Real remotes repeat the same frame several
+    # times per press, so only commit once the SAME capture (same sample
+    # count, each value within tolerance) is seen twice in a row - noise
+    # is very unlikely to repeat itself that precisely back to back.
     on_raw:
       - lambda: |-
           if (id(is_rf_learning_mode)) {
             if (x.size() > id(filter_size)) {
-              std::vector<int> d;
-              d.push_back(0);
-              for (auto v : x) d.push_back((int) v);
-              id(signal_nvs).save_to_nvs(id(rf_signal_select_index), d);
-              ESP_LOGI("RF_LEARNING", "Signal saved to slot %d, size: %d", id(rf_signal_select_index), x.size());
-              id(is_rf_learning_mode) = false;
-              id(rf_status_text).publish_state("Signal learned!");
+              bool matches_candidate = id(rf_learn_candidate).size() == x.size();
+              if (matches_candidate) {
+                for (size_t i = 0; i < x.size(); i++) {
+                  int a = id(rf_learn_candidate)[i];
+                  int b = (int) x[i];
+                  int diff = a > b ? a - b : b - a;
+                  int allowed = std::max(50, std::max(a, b) * 30 / 100);
+                  if (diff > allowed) {
+                    matches_candidate = false;
+                    break;
+                  }
+                }
+              }
+              if (matches_candidate) {
+                std::vector<int> d;
+                d.push_back(0);
+                for (auto v : x) d.push_back((int) v);
+                id(signal_nvs).save_to_nvs(id(rf_signal_select_index), d);
+                ESP_LOGI("RF_LEARNING", "Signal saved to slot %d, size: %d", id(rf_signal_select_index), x.size());
+                id(is_rf_learning_mode) = false;
+                id(rf_learn_candidate).clear();
+                id(rf_status_text).publish_state("Signal learned!");
+              } else {
+                id(rf_learn_candidate).assign(x.begin(), x.end());
+                ESP_LOGI("RF_LEARNING", "Candidate signal captured (size %d), press the button again to confirm", x.size());
+                id(rf_status_text).publish_state("Press again to confirm...");
+              }
             } else {
               ESP_LOGW("RF_LEARNING", "Signal too short: %d", x.size());
             }
@@ -393,6 +428,7 @@ button:
     on_press:
       - lambda: |-
           id(is_rf_learning_mode) = true;
+          id(rf_learn_candidate).clear();
           ESP_LOGI("RF_LEARNING", "Learning mode activated for slot %d", id(rf_signal_select_index));
           id(rf_status_text).publish_state("Ready to learn...");
 
