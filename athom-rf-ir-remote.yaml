@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.0.8"
+  project_version: "v3.0.9"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -104,6 +104,12 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
+  # Gates the protocol-aware capture analyser on the RF receiver (see below).
+  # Off by default so ambient 433 MHz traffic does not fill the log.
+  - id: rf_analyze_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
 
 # Flash storage component for saving IR signals
 Flash_comp:
@@ -209,6 +215,105 @@ remote_receiver:
     idle: 4ms
     tolerance: 50%
     id: rf_receiver
+    # Protocol-aware capture analyser, gated behind the "RF Analyze" switch so
+    # ambient 433 MHz noise does not spam the log. Unlike a plain raw dump this
+    # validates structure before believing a capture: it least-squares fits the
+    # symbol period T, then checks every symbol lands on an n*T grid. A clean
+    # A-OK frame is exactly 64 symbols of 1*T and 66 of 2*T (T ~= 300us); a
+    # clean Sublimex/Dooya frame is 40 bits on a T ~= 355us grid. Anything with
+    # symbols off-grid, an unexpected count, or a large residual is a degraded
+    # capture and is reported as such rather than silently accepted.
+    #
+    # It also prints the timing snapped to the fitted grid, ready to paste into
+    # a transmit_raw button - which is how the codes further down were cleaned.
+    on_raw:
+      - lambda: |-
+          if (!id(rf_analyze_mode))
+            return;
+          size_t n = x.size();
+          if (n < 40) return;                       // ignore short noise bursts
+
+          std::vector<int> mag;
+          mag.reserve(n);
+          for (auto d : x) mag.push_back(d < 0 ? -d : d);
+
+          // Split header/gap items (long) from data symbols.
+          std::vector<int> body;
+          int header_items = 0;
+          for (size_t i = 0; i < mag.size(); i++) {
+            if (mag[i] > 1500) header_items++;
+            else body.push_back(mag[i]);
+          }
+          if (body.size() < 30) {
+            ESP_LOGW("RF_ANALYZE", "Only %d data symbols - too short, ignoring", (int) body.size());
+            return;
+          }
+
+          // Least-squares fit of the symbol period T (every symbol ~= k*T).
+          float T = 300.0f;
+          for (int iter = 0; iter < 30; iter++) {
+            float num = 0, den = 0;
+            for (int d : body) {
+              int k = (int) ((d / T) + 0.5f);
+              if (k < 1) k = 1;
+              if (k > 4) k = 4;
+              num += (float) d * k;
+              den += (float) k * k;
+            }
+            if (den > 0) T = num / den;
+          }
+
+          int c1 = 0, c2 = 0, cother = 0, maxres = 0;
+          for (int d : body) {
+            int k = (int) ((d / T) + 0.5f);
+            if (k < 1) k = 1;
+            if (k == 1) c1++; else if (k == 2) c2++; else cother++;
+            int res = d - (int) (k * T + 0.5f);
+            if (res < 0) res = -res;
+            if (res > maxres) maxres = res;
+          }
+
+          const char *verdict = "UNKNOWN";
+          if (cother == 0 && maxres < (int) (T * 0.25f)) {
+            if (c1 == 64 && c2 == 66)        verdict = "GOOD A-OK frame (64x1T + 66x2T)";
+            else if (c1 + c2 == 79)          verdict = "GOOD Dooya-length frame";
+            else                             verdict = "on-grid, but unexpected symbol count";
+          } else {
+            verdict = "DEGRADED - off-grid symbols, do not trust";
+          }
+          ESP_LOGI("RF_ANALYZE", "items=%d header=%d symbols=%d T=%.1fus 1T=%d 2T=%d other=%d maxresid=%dus -> %s",
+                   (int) n, header_items, (int) body.size(), T, c1, c2, cother, maxres, verdict);
+
+          // Emit the grid-snapped waveform, chunked to stay inside the log buffer.
+          std::string line;
+          char buf[16];
+          for (size_t i = 0; i < mag.size(); i++) {
+            int q;
+            if (mag[i] > 1500) {
+              q = mag[i];                            // header/gap kept as measured
+            } else {
+              int k = (int) ((mag[i] / T) + 0.5f);
+              if (k < 1) k = 1;
+              q = (int) (k * T + 0.5f);
+            }
+            snprintf(buf, sizeof(buf), "%d, ", x[i] < 0 ? -q : q);
+            line += buf;
+            if ((i + 1) % 16 == 0) {
+              ESP_LOGI("RF_ANALYZE", "  %s", line.c_str());
+              line.clear();
+            }
+          }
+          if (!line.empty())
+            ESP_LOGI("RF_ANALYZE", "  %s", line.c_str());
+    # Sublimex/Dooya frames get an exact field decode for free from ESPHome's
+    # built-in protocol, which validates the header and all 40 bits - so any
+    # frame that fires this is structurally sound, no grid fitting needed.
+    on_dooya:
+      - lambda: |-
+          if (!id(rf_analyze_mode))
+            return;
+          ESP_LOGI("RF_ANALYZE", "DOOYA decoded: id=0x%06X channel=%d button=%d check=%d",
+                   (unsigned int) x.id, (int) x.channel, (int) x.button, (int) x.check);
     on_rc_switch:
       - lambda: |-
           if (id(is_rf_learning_mode)) {
@@ -688,6 +793,23 @@ button:
             wait_time: 5065us
 
 
+
+switch:
+  # Turn on, press a button on the physical remote near the device, then read
+  # the "RF_ANALYZE" lines in the ESPHome log. Turn off when finished.
+  - platform: template
+    name: "RF Analyze"
+    icon: mdi:magnify-scan
+    optimistic: true
+    entity_category: config
+    turn_on_action:
+      - lambda: |-
+          id(rf_analyze_mode) = true;
+          ESP_LOGI("RF_ANALYZE", "Analyze mode ON - press a remote button near the device");
+    turn_off_action:
+      - lambda: |-
+          id(rf_analyze_mode) = false;
+          ESP_LOGI("RF_ANALYZE", "Analyze mode OFF");
 
 light:
   - platform: status_led
