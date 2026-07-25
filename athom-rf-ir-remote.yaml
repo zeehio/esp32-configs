@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.0.7"
+  project_version: "v3.0.8"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -405,26 +405,32 @@ button:
           ESP_LOGI("RF_LEARNING", "Cleared slot %d", id(rf_signal_select_index));
           id(rf_status_text).publish_state("Slot cleared");
 
+
   #################### Direct RF433 cover codes ####################
   # Waveforms recovered from a Tuya RF bridge export, whose study-mode payload
-  # turned out to be plain uint16 little-endian microsecond values. They are
-  # replayed verbatim, so the A-OK protocol does not need to be decoded to be
-  # transmitted, and the Sublimex ones need no rc_switch/Dooya round trip.
+  # is plain uint16 little-endian microsecond values.
   #
-  # The Sublimex frames decode cleanly as Dooya (40 bits: 24-bit id, 8-bit
-  # channel, 4-bit button, 4-bit check), which is what established the encoding
-  # convention used here: the first value of each capture is the inter-frame gap
-  # (~7.76 ms, matching Dooya) and odd indices are marks, so each frame starts
-  # and ends on a mark.
+  # Sublimex DC1600 covers speak Dooya (40 bits: 24-bit id, 8-bit channel,
+  # 4-bit button, 4-bit check) and are replayed verbatim -- confirmed working.
+  # That decode is also what established the capture convention used here: the
+  # first value is the inter-frame gap (~7.76 ms, matching Dooya) and odd
+  # indices are marks, so each frame starts and ends on a mark. Field testing
+  # confirmed the same convention holds for the A-OK captures.
   #
-  # CAVEAT: the original remotes transmit at 433.24-433.39 MHz. This board's RF
-  # front end is fixed near 433.92 MHz and cannot be retuned in software (its
-  # `frequency:` option is advertised metadata only). The waveforms below are
-  # timing-exact, but whether each motor's receiver tolerates a ~600 kHz carrier
-  # offset is a hardware question. A cover that stays silent for both variants
-  # is most likely hitting that limit, not a bad capture.
+  # A-OK AC123-02D covers use a ~98-bit Manchester encoding whose fields are
+  # still undecoded -- but replaying the timing needs no field decode.
+  # Their symbols are NOT replayed verbatim: the Tuya receiver reported every
+  # 1xT symbol as one of two values (e.g. 273 and 318 us) and occasionally
+  # stretched a 2xT symbol as far as 696 us. Least-squares fitting shows each
+  # frame is exactly 64 symbols of 1xT and 66 of 2xT with T ~= 300 us, and the
+  # recovered Manchester half-bit stream is bit-identical before and after
+  # snapping every symbol to n*T -- so that spread carries no information and
+  # is measurement artifact from the Tuya receiver's slicer. Replaying it would
+  # re-inject another receiver's distortion (up to 103 us of error per symbol)
+  # into a phase-sensitive 98-bit frame. The values below are therefore snapped
+  # to a clean per-frame n*T grid.
 
-  # Sublimex DC1600 (Dooya id=0xC389EB ch=5 button=1), captured at 433.3 MHz
+  # Sublimex DC1600 (Dooya id=0xC389EB ch=5 button=1), captured at 433.3 MHz - verbatim
   - platform: template
     name: "Dormitorio Open"
     icon: mdi:arrow-up-bold-box
@@ -444,7 +450,7 @@ button:
             wait_time: 7755us
 
 
-  # Sublimex DC1600 (Dooya id=0xC389EB ch=5 button=3), captured at 433.24 MHz
+  # Sublimex DC1600 (Dooya id=0xC389EB ch=5 button=3), captured at 433.24 MHz - verbatim
   - platform: template
     name: "Dormitorio Close"
     icon: mdi:arrow-down-bold-box
@@ -464,7 +470,7 @@ button:
             wait_time: 7754us
 
 
-  # Sublimex DC1600 (Dooya id=0xC389EB ch=5 button=5), captured at 433.32 MHz
+  # Sublimex DC1600 (Dooya id=0xC389EB ch=5 button=5), captured at 433.32 MHz - verbatim
   - platform: template
     name: "Dormitorio Stop"
     icon: mdi:stop-circle
@@ -484,7 +490,7 @@ button:
             wait_time: 7752us
 
 
-  # Sublimex DC1600 (Dooya id=0xC089B7 ch=5 button=1), captured at 433.37 MHz
+  # Sublimex DC1600 (Dooya id=0xC089B7 ch=5 button=1), captured at 433.37 MHz - verbatim
   - platform: template
     name: "Sala Open"
     icon: mdi:arrow-up-bold-box
@@ -504,7 +510,7 @@ button:
             wait_time: 7765us
 
 
-  # Sublimex DC1600 (Dooya id=0xC089B7 ch=5 button=3), captured at 433.34 MHz
+  # Sublimex DC1600 (Dooya id=0xC089B7 ch=5 button=3), captured at 433.34 MHz - verbatim
   - platform: template
     name: "Sala Close"
     icon: mdi:arrow-down-bold-box
@@ -524,7 +530,7 @@ button:
             wait_time: 7771us
 
 
-  # Sublimex DC1600 (Dooya id=0xC089B7 ch=5 button=5), captured at 433.27 MHz
+  # Sublimex DC1600 (Dooya id=0xC089B7 ch=5 button=5), captured at 433.27 MHz - verbatim
   - platform: template
     name: "Sala Stop"
     icon: mdi:stop-circle
@@ -544,7 +550,7 @@ button:
             wait_time: 7759us
 
 
-  # A-OK AC123-02D (Manchester, fields undecoded), captured at 433.34 MHz - variant A
+  # A-OK AC123-02D elia open, captured at 433.34 MHz - snapped to T=302us grid (frame 58740->59192 us, 131 items)
   - platform: template
     name: "Elia Open"
     icon: mdi:arrow-up-bold-box
@@ -553,21 +559,21 @@ button:
           transmitter_id: rf_transmitter
           carrier_frequency: 0Hz
           code: [
-                  5114, -609, 609, -281, 318, -609, 609, -281, 281, -609, 318, -609, 318, -609, 609, -281, 609,
-                  -245, 609, -245, 609, -318, 281, -609, 318, -609, 609, -245, 281, -609, 281, -609, 318, -609,
-                  281, -609, 609, -318, 609, -245, 318, -609, 609, -245, 609, -318, 609, -281, 281, -609, 281,
-                  -609, 318, -609, 609, -281, 281, -609, 609, -281, 609, -281, 318, -609, 281, -609, 281, -609,
-                  281, -609, 318, -609, 318, -609, 281, -609, 318, -609, 609, -281, 318, -609, 281, -609, 281,
-                  -609, 318, -609, 281, -609, 318, -609, 281, -609, 318, -609, 281, -609, 318, -609, 281, -609,
-                  318, -609, 318, -609, 609, -245, 281, -609, 609, -281, 609, -281, 281, -609, 609, -281, 609,
-                  -281, 318, -609, 609, -245, 609, -281, 609, -281, 609, -281, 609
+                  5114, -604, 604, -302, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604, 604, -302, 604,
+                  -302, 604, -302, 604, -302, 302, -604, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604,
+                  302, -604, 604, -302, 604, -302, 302, -604, 604, -302, 604, -302, 604, -302, 302, -604, 302,
+                  -604, 302, -604, 604, -302, 302, -604, 604, -302, 604, -302, 302, -604, 302, -604, 302, -604,
+                  302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 604, -302, 302, -604, 302, -604, 302,
+                  -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604,
+                  302, -604, 302, -604, 604, -302, 302, -604, 604, -302, 604, -302, 302, -604, 604, -302, 604,
+                  -302, 302, -604, 604, -302, 604, -302, 604, -302, 604, -302, 604
           ]
           repeat:
-            times: 8
+            times: 12
             wait_time: 5114us
 
 
-  # A-OK AC123-02D (Manchester, fields undecoded), captured at 433.39 MHz - variant A
+  # A-OK AC123-02D elia close, captured at 433.39 MHz - snapped to T=301us grid (frame 58592->58996 us, 131 items)
   - platform: template
     name: "Elia Close"
     icon: mdi:arrow-down-bold-box
@@ -576,21 +582,21 @@ button:
           transmitter_id: rf_transmitter
           carrier_frequency: 0Hz
           code: [
-                  5115, -609, 609, -272, 272, -609, 609, -272, 317, -609, 317, -609, 317, -609, 609, -272, 609,
-                  -272, 609, -272, 609, -272, 272, -609, 317, -609, 609, -272, 272, -609, 317, -609, 272, -609,
-                  317, -609, 609, -272, 609, -272, 317, -609, 609, -272, 609, -272, 609, -272, 317, -609, 272,
-                  -609, 317, -609, 609, -272, 317, -609, 609, -272, 609, -272, 272, -609, 317, -609, 317, -609,
-                  272, -609, 317, -609, 317, -609, 317, -609, 272, -609, 609, -272, 272, -609, 272, -609, 317,
-                  -609, 272, -609, 317, -609, 272, -609, 272, -609, 317, -609, 317, -609, 317, -609, 609, -272,
-                  317, -609, 272, -609, 317, -609, 272, -609, 609, -272, 609, -272, 609, -272, 272, -609, 609,
-                  -272, 272, -609, 272, -609, 609, -272, 609, -272, 609, -272, 609
+                  5115, -602, 602, -301, 301, -602, 602, -301, 301, -602, 301, -602, 301, -602, 602, -301, 602,
+                  -301, 602, -301, 602, -301, 301, -602, 301, -602, 602, -301, 301, -602, 301, -602, 301, -602,
+                  301, -602, 602, -301, 602, -301, 301, -602, 602, -301, 602, -301, 602, -301, 301, -602, 301,
+                  -602, 301, -602, 602, -301, 301, -602, 602, -301, 602, -301, 301, -602, 301, -602, 301, -602,
+                  301, -602, 301, -602, 301, -602, 301, -602, 301, -602, 602, -301, 301, -602, 301, -602, 301,
+                  -602, 301, -602, 301, -602, 301, -602, 301, -602, 301, -602, 301, -602, 301, -602, 602, -301,
+                  301, -602, 301, -602, 301, -602, 301, -602, 602, -301, 602, -301, 602, -301, 301, -602, 602,
+                  -301, 301, -602, 301, -602, 602, -301, 602, -301, 602, -301, 602
           ]
           repeat:
-            times: 8
+            times: 12
             wait_time: 5115us
 
 
-  # A-OK AC123-02D (Manchester, fields undecoded), captured at 433.26 MHz - variant A
+  # A-OK AC123-02D elia stop, captured at 433.26 MHz - snapped to T=299us grid (frame 57968->58604 us, 131 items)
   - platform: template
     name: "Elia Stop"
     icon: mdi:stop-circle
@@ -599,21 +605,21 @@ button:
           transmitter_id: rf_transmitter
           carrier_frequency: 0Hz
           code: [
-                  5000, -606, 606, -273, 273, -606, 606, -323, 273, -606, 273, -606, 273, -606, 606, -273, 606,
-                  -273, 606, -273, 606, -273, 273, -606, 273, -606, 273, -606, 273, -606, 273, -606, 273, -606,
-                  323, -606, 606, -273, 273, -606, 606, -273, 273, -606, 606, -273, 606, -273, 273, -606, 606,
-                  -273, 606, -323, 606, -323, 606, -273, 606, -323, 606, -273, 606, -273, 606, -273, 273, -606,
-                  273, -606, 273, -606, 273, -606, 606, -273, 273, -606, 273, -606, 323, -606, 273, -606, 273,
-                  -606, 323, -606, 273, -606, 273, -606, 273, -606, 323, -606, 273, -606, 273, -606, 273, -606,
-                  606, -273, 273, -606, 273, -606, 273, -606, 606, -273, 606, -323, 273, -606, 606, -273, 273,
-                  -606, 323, -606, 273, -606, 273, -606, 273, -606, 273, -606, 606
+                  5000, -598, 598, -299, 299, -598, 598, -299, 299, -598, 299, -598, 299, -598, 598, -299, 598,
+                  -299, 598, -299, 598, -299, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598,
+                  299, -598, 598, -299, 299, -598, 598, -299, 299, -598, 598, -299, 598, -299, 299, -598, 598,
+                  -299, 598, -299, 598, -299, 598, -299, 598, -299, 598, -299, 598, -299, 598, -299, 299, -598,
+                  299, -598, 299, -598, 299, -598, 598, -299, 299, -598, 299, -598, 299, -598, 299, -598, 299,
+                  -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598,
+                  598, -299, 299, -598, 299, -598, 299, -598, 598, -299, 598, -299, 299, -598, 598, -299, 299,
+                  -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 598
           ]
           repeat:
-            times: 8
+            times: 12
             wait_time: 5000us
 
 
-  # A-OK AC123-02D (Manchester, fields undecoded), captured at 433.35 MHz - variant A
+  # A-OK AC123-02D sofia open, captured at 433.35 MHz - snapped to T=302us grid (frame 58750->59192 us, 131 items)
   - platform: template
     name: "Sofia Open"
     icon: mdi:arrow-up-bold-box
@@ -622,21 +628,21 @@ button:
           transmitter_id: rf_transmitter
           carrier_frequency: 0Hz
           code: [
-                  5105, -608, 608, -312, 275, -608, 608, -275, 275, -608, 275, -608, 275, -608, 665, -275, 608,
-                  -275, 608, -275, 665, -275, 312, -608, 275, -608, 608, -275, 312, -608, 312, -608, 275, -608,
-                  312, -608, 608, -275, 608, -275, 312, -608, 608, -312, 608, -275, 608, -275, 312, -608, 275,
-                  -608, 275, -608, 608, -275, 275, -608, 608, -275, 608, -275, 275, -608, 312, -608, 312, -608,
-                  275, -608, 312, -608, 275, -608, 312, -608, 275, -608, 312, -608, 608, -275, 312, -608, 275,
-                  -608, 275, -608, 275, -608, 312, -608, 275, -608, 312, -608, 312, -608, 312, -608, 312, -608,
-                  275, -608, 275, -608, 608, -312, 275, -608, 608, -275, 608, -275, 312, -608, 665, -275, 608,
-                  -275, 312, -608, 608, -275, 608, -275, 608, -275, 312, -608, 608
+                  5105, -604, 604, -302, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604, 604, -302, 604,
+                  -302, 604, -302, 604, -302, 302, -604, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604,
+                  302, -604, 604, -302, 604, -302, 302, -604, 604, -302, 604, -302, 604, -302, 302, -604, 302,
+                  -604, 302, -604, 604, -302, 302, -604, 604, -302, 604, -302, 302, -604, 302, -604, 302, -604,
+                  302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 604, -302, 302, -604, 302,
+                  -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604,
+                  302, -604, 302, -604, 604, -302, 302, -604, 604, -302, 604, -302, 302, -604, 604, -302, 604,
+                  -302, 302, -604, 604, -302, 604, -302, 604, -302, 302, -604, 604
           ]
           repeat:
-            times: 8
+            times: 12
             wait_time: 5105us
 
 
-  # A-OK AC123-02D (Manchester, fields undecoded), captured at 433.29 MHz - variant A
+  # A-OK AC123-02D sofia close, captured at 433.29 MHz - snapped to T=297us grid (frame 57883->58212 us, 131 items)
   - platform: template
     name: "Sofia Close"
     icon: mdi:arrow-down-bold-box
@@ -645,21 +651,21 @@ button:
           transmitter_id: rf_transmitter
           carrier_frequency: 0Hz
           code: [
-                  5254, -595, 595, -295, 295, -595, 595, -249, 295, -595, 295, -595, 249, -595, 595, -249, 595,
-                  -295, 595, -295, 595, -295, 295, -595, 295, -595, 595, -249, 295, -595, 295, -595, 295, -595,
-                  295, -595, 595, -295, 595, -295, 295, -595, 595, -295, 595, -249, 595, -295, 295, -595, 295,
-                  -595, 295, -595, 595, -295, 295, -595, 595, -295, 595, -295, 295, -595, 295, -595, 295, -595,
-                  295, -595, 295, -595, 295, -595, 295, -595, 295, -595, 295, -595, 595, -295, 295, -595, 295,
-                  -595, 295, -595, 295, -595, 295, -595, 295, -595, 295, -595, 295, -595, 295, -595, 595, -295,
-                  295, -595, 295, -595, 295, -595, 295, -595, 696, -249, 595, -295, 595, -249, 295, -595, 595,
-                  -295, 249, -595, 295, -595, 595, -295, 595, -295, 295, -595, 595
+                  5254, -594, 594, -297, 297, -594, 594, -297, 297, -594, 297, -594, 297, -594, 594, -297, 594,
+                  -297, 594, -297, 594, -297, 297, -594, 297, -594, 594, -297, 297, -594, 297, -594, 297, -594,
+                  297, -594, 594, -297, 594, -297, 297, -594, 594, -297, 594, -297, 594, -297, 297, -594, 297,
+                  -594, 297, -594, 594, -297, 297, -594, 594, -297, 594, -297, 297, -594, 297, -594, 297, -594,
+                  297, -594, 297, -594, 297, -594, 297, -594, 297, -594, 297, -594, 594, -297, 297, -594, 297,
+                  -594, 297, -594, 297, -594, 297, -594, 297, -594, 297, -594, 297, -594, 297, -594, 594, -297,
+                  297, -594, 297, -594, 297, -594, 297, -594, 594, -297, 594, -297, 594, -297, 297, -594, 594,
+                  -297, 297, -594, 297, -594, 594, -297, 594, -297, 297, -594, 594
           ]
           repeat:
-            times: 8
+            times: 12
             wait_time: 5254us
 
 
-  # A-OK AC123-02D (Manchester, fields undecoded), captured at 433.33 MHz - variant A
+  # A-OK AC123-02D sofia stop, captured at 433.33 MHz - snapped to T=302us grid (frame 58902->59192 us, 131 items)
   - platform: template
     name: "Sofia Stop"
     icon: mdi:stop-circle
@@ -668,164 +674,19 @@ button:
           transmitter_id: rf_transmitter
           carrier_frequency: 0Hz
           code: [
-                  5065, -610, 610, -273, 318, -610, 610, -273, 318, -610, 318, -610, 318, -610, 610, -273, 610,
-                  -273, 610, -273, 610, -273, 318, -610, 273, -610, 610, -273, 273, -610, 318, -610, 318, -610,
-                  273, -610, 610, -318, 610, -273, 318, -610, 610, -273, 610, -273, 610, -273, 273, -610, 318,
-                  -610, 273, -610, 610, -273, 273, -610, 610, -273, 610, -318, 273, -610, 318, -610, 273, -610,
-                  318, -610, 318, -610, 273, -610, 318, -610, 318, -610, 318, -610, 610, -273, 273, -610, 318,
-                  -610, 273, -610, 318, -610, 273, -610, 318, -610, 318, -610, 273, -610, 318, -610, 318, -610,
-                  610, -273, 273, -610, 273, -610, 318, -610, 610, -273, 610, -273, 610, -273, 318, -610, 273,
-                  -610, 273, -610, 318, -610, 610, -273, 610, -273, 273, -610, 610
+                  5065, -604, 604, -302, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604, 604, -302, 604,
+                  -302, 604, -302, 604, -302, 302, -604, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604,
+                  302, -604, 604, -302, 604, -302, 302, -604, 604, -302, 604, -302, 604, -302, 302, -604, 302,
+                  -604, 302, -604, 604, -302, 302, -604, 604, -302, 604, -302, 302, -604, 302, -604, 302, -604,
+                  302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 604, -302, 302, -604, 302,
+                  -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604,
+                  604, -302, 302, -604, 302, -604, 302, -604, 604, -302, 604, -302, 604, -302, 302, -604, 302,
+                  -604, 302, -604, 302, -604, 604, -302, 604, -302, 302, -604, 604
           ]
           repeat:
-            times: 8
+            times: 12
             wait_time: 5065us
 
-
-  # ---- A-OK variant B (alternate alignment) ----------------------------------
-  # The Sublimex captures proved the "first value = inter-frame gap, odd indices
-  # are marks" convention. The A-OK captures instead begin with two identical
-  # 5000 us values, which makes that convention ambiguous for them: the leading
-  # value could be a gap (variant A above) or a 5000 us preamble mark (variant B
-  # below). Both are physically plausible, so both are provided rather than
-  # guessed at. Try B only if A produces no response.
-
-  # A-OK variant B: leading 5000 us treated as a mark (elia open)
-  - platform: template
-    name: "Elia Open Alt"
-    icon: mdi:arrow-up-bold-box
-    on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5114, -5114, 609, -609, 281, -318, 609, -609, 281, -281, 609, -318, 609, -318, 609, -609, 281,
-                  -609, 245, -609, 245, -609, 318, -281, 609, -318, 609, -609, 245, -281, 609, -281, 609, -318,
-                  609, -281, 609, -609, 318, -609, 245, -318, 609, -609, 245, -609, 318, -609, 281, -281, 609,
-                  -281, 609, -318, 609, -609, 281, -281, 609, -609, 281, -609, 281, -318, 609, -281, 609, -281,
-                  609, -281, 609, -318, 609, -318, 609, -281, 609, -318, 609, -609, 281, -318, 609, -281, 609,
-                  -281, 609, -318, 609, -281, 609, -318, 609, -281, 609, -318, 609, -281, 609, -318, 609, -281,
-                  609, -318, 609, -318, 609, -609, 245, -281, 609, -609, 281, -609, 281, -281, 609, -609, 281,
-                  -609, 281, -318, 609, -609, 245, -609, 281, -609, 281, -609, 281, -609
-          ]
-          repeat:
-            times: 8
-            wait_time: 5000us
-
-
-  # A-OK variant B: leading 5000 us treated as a mark (elia close)
-  - platform: template
-    name: "Elia Close Alt"
-    icon: mdi:arrow-down-bold-box
-    on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5115, -5115, 609, -609, 272, -272, 609, -609, 272, -317, 609, -317, 609, -317, 609, -609, 272,
-                  -609, 272, -609, 272, -609, 272, -272, 609, -317, 609, -609, 272, -272, 609, -317, 609, -272,
-                  609, -317, 609, -609, 272, -609, 272, -317, 609, -609, 272, -609, 272, -609, 272, -317, 609,
-                  -272, 609, -317, 609, -609, 272, -317, 609, -609, 272, -609, 272, -272, 609, -317, 609, -317,
-                  609, -272, 609, -317, 609, -317, 609, -317, 609, -272, 609, -609, 272, -272, 609, -272, 609,
-                  -317, 609, -272, 609, -317, 609, -272, 609, -272, 609, -317, 609, -317, 609, -317, 609, -609,
-                  272, -317, 609, -272, 609, -317, 609, -272, 609, -609, 272, -609, 272, -609, 272, -272, 609,
-                  -609, 272, -272, 609, -272, 609, -609, 272, -609, 272, -609, 272, -609
-          ]
-          repeat:
-            times: 8
-            wait_time: 5000us
-
-
-  # A-OK variant B: leading 5000 us treated as a mark (elia stop)
-  - platform: template
-    name: "Elia Stop Alt"
-    icon: mdi:stop-circle
-    on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5000, -5000, 606, -606, 273, -273, 606, -606, 323, -273, 606, -273, 606, -273, 606, -606, 273,
-                  -606, 273, -606, 273, -606, 273, -273, 606, -273, 606, -273, 606, -273, 606, -273, 606, -273,
-                  606, -323, 606, -606, 273, -273, 606, -606, 273, -273, 606, -606, 273, -606, 273, -273, 606,
-                  -606, 273, -606, 323, -606, 323, -606, 273, -606, 323, -606, 273, -606, 273, -606, 273, -273,
-                  606, -273, 606, -273, 606, -273, 606, -606, 273, -273, 606, -273, 606, -323, 606, -273, 606,
-                  -273, 606, -323, 606, -273, 606, -273, 606, -273, 606, -323, 606, -273, 606, -273, 606, -273,
-                  606, -606, 273, -273, 606, -273, 606, -273, 606, -606, 273, -606, 323, -273, 606, -606, 273,
-                  -273, 606, -323, 606, -273, 606, -273, 606, -273, 606, -273, 606, -606
-          ]
-          repeat:
-            times: 8
-            wait_time: 5000us
-
-
-  # A-OK variant B: leading 5000 us treated as a mark (sofia open)
-  - platform: template
-    name: "Sofia Open Alt"
-    icon: mdi:arrow-up-bold-box
-    on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5105, -5105, 608, -608, 312, -275, 608, -608, 275, -275, 608, -275, 608, -275, 608, -665, 275,
-                  -608, 275, -608, 275, -665, 275, -312, 608, -275, 608, -608, 275, -312, 608, -312, 608, -275,
-                  608, -312, 608, -608, 275, -608, 275, -312, 608, -608, 312, -608, 275, -608, 275, -312, 608,
-                  -275, 608, -275, 608, -608, 275, -275, 608, -608, 275, -608, 275, -275, 608, -312, 608, -312,
-                  608, -275, 608, -312, 608, -275, 608, -312, 608, -275, 608, -312, 608, -608, 275, -312, 608,
-                  -275, 608, -275, 608, -275, 608, -312, 608, -275, 608, -312, 608, -312, 608, -312, 608, -312,
-                  608, -275, 608, -275, 608, -608, 312, -275, 608, -608, 275, -608, 275, -312, 608, -665, 275,
-                  -608, 275, -312, 608, -608, 275, -608, 275, -608, 275, -312, 608, -608
-          ]
-          repeat:
-            times: 8
-            wait_time: 5000us
-
-
-  # A-OK variant B: leading 5000 us treated as a mark (sofia close)
-  - platform: template
-    name: "Sofia Close Alt"
-    icon: mdi:arrow-down-bold-box
-    on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5254, -5254, 595, -595, 295, -295, 595, -595, 249, -295, 595, -295, 595, -249, 595, -595, 249,
-                  -595, 295, -595, 295, -595, 295, -295, 595, -295, 595, -595, 249, -295, 595, -295, 595, -295,
-                  595, -295, 595, -595, 295, -595, 295, -295, 595, -595, 295, -595, 249, -595, 295, -295, 595,
-                  -295, 595, -295, 595, -595, 295, -295, 595, -595, 295, -595, 295, -295, 595, -295, 595, -295,
-                  595, -295, 595, -295, 595, -295, 595, -295, 595, -295, 595, -295, 595, -595, 295, -295, 595,
-                  -295, 595, -295, 595, -295, 595, -295, 595, -295, 595, -295, 595, -295, 595, -295, 595, -595,
-                  295, -295, 595, -295, 595, -295, 595, -295, 595, -696, 249, -595, 295, -595, 249, -295, 595,
-                  -595, 295, -249, 595, -295, 595, -595, 295, -595, 295, -295, 595, -595
-          ]
-          repeat:
-            times: 8
-            wait_time: 5000us
-
-
-  # A-OK variant B: leading 5000 us treated as a mark (sofia stop)
-  - platform: template
-    name: "Sofia Stop Alt"
-    icon: mdi:stop-circle
-    on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5065, -5065, 610, -610, 273, -318, 610, -610, 273, -318, 610, -318, 610, -318, 610, -610, 273,
-                  -610, 273, -610, 273, -610, 273, -318, 610, -273, 610, -610, 273, -273, 610, -318, 610, -318,
-                  610, -273, 610, -610, 318, -610, 273, -318, 610, -610, 273, -610, 273, -610, 273, -273, 610,
-                  -318, 610, -273, 610, -610, 273, -273, 610, -610, 273, -610, 318, -273, 610, -318, 610, -273,
-                  610, -318, 610, -318, 610, -273, 610, -318, 610, -318, 610, -318, 610, -610, 273, -273, 610,
-                  -318, 610, -273, 610, -318, 610, -273, 610, -318, 610, -318, 610, -273, 610, -318, 610, -318,
-                  610, -610, 273, -273, 610, -273, 610, -318, 610, -610, 273, -610, 273, -610, 273, -318, 610,
-                  -273, 610, -273, 610, -318, 610, -610, 273, -610, 273, -273, 610, -610
-          ]
-          repeat:
-            times: 8
-            wait_time: 5000us
 
 
 light:
