@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.0.9"
+  project_version: "v3.1.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -110,6 +110,29 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # --- experiment plumbing (see the EXP buttons) ---
+  - id: exp_buf
+    type: std::vector<int32_t>
+    restore_value: no
+    initial_value: 'std::vector<int32_t>()'
+  - id: exp_times
+    type: uint32_t
+    restore_value: no
+    initial_value: '1'
+  - id: exp_gap
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: exp_trial
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # When non-zero, the analyser compares any decoded A-OK frame against this
+  # and reports the loopback PASS/FAIL (see EXP E15).
+  - id: exp_expect_code
+    type: uint64_t
+    restore_value: no
+    initial_value: '0'
 
 # Flash storage component for saving IR signals
 Flash_comp:
@@ -283,6 +306,50 @@ remote_receiver:
           }
           ESP_LOGI("RF_ANALYZE", "items=%d header=%d symbols=%d T=%.1fus 1T=%d 2T=%d other=%d maxresid=%dus -> %s",
                    (int) n, header_items, (int) body.size(), T, c1, c2, cother, maxres, verdict);
+
+          // A-OK field decode. The run structure is a pulse-distance code, same
+          // scheme as Dooya but with T ~= 300us and 64 bits: pairing the runs
+          // from index 1 gives (1T,2T)=0 and (2T,1T)=1, framed by a 2T header
+          // low and a 2T trailing mark (which is why a frame has 64 one-T runs
+          // and 66 two-T runs: one of each per bit, plus the two framing runs).
+          if (body.size() >= 129) {
+            bool paired = true;
+            uint64_t code = 0;
+            int bad_at = -1;
+            for (int i = 0; i < 64; i++) {
+              int hi = (int) ((body[1 + 2 * i] / T) + 0.5f);
+              int lo = (int) ((body[2 + 2 * i] / T) + 0.5f);
+              if (hi == 1 && lo == 2)      code = (code << 1);
+              else if (hi == 2 && lo == 1) code = (code << 1) | 1ULL;
+              else { paired = false; bad_at = i; break; }
+            }
+            if (paired) {
+              uint8_t by[8];
+              for (int i = 0; i < 8; i++) by[i] = (uint8_t) (code >> (56 - 8 * i));
+              int s = 0;
+              for (int i = 0; i < 7; i++) s += by[i];
+              uint8_t calc = (uint8_t) ((s + 0x5D) & 0xFF);
+              uint32_t dev = ((uint32_t) by[0] << 24) | ((uint32_t) by[1] << 16) |
+                             ((uint32_t) by[2] << 8) | by[3];
+              const char *cmdname = by[6] == 0x0B ? "UP/open" :
+                                    by[6] == 0x43 ? "DOWN/close" :
+                                    by[6] == 0x23 ? "STOP" : "unknown";
+              ESP_LOGI("RF_ANALYZE", "  A-OK: code=0x%016llX ID=0x%08X ch=%d pad=0x%02X cmd=0x%02X (%s) cksum=0x%02X calc=0x%02X -> %s",
+                       (unsigned long long) code, (unsigned) dev, (int) by[4], (int) by[5],
+                       (int) by[6], cmdname, (int) by[7], (int) calc,
+                       calc == by[7] ? "CHECKSUM OK" : "CHECKSUM BAD (capture is corrupt)");
+              if (id(exp_expect_code) != 0) {
+                bool match = (code == id(exp_expect_code));
+                ESP_LOGI("RF_ANALYZE", "  LOOPBACK: expected 0x%016llX -> %s",
+                         (unsigned long long) id(exp_expect_code),
+                         match ? "MATCH - PASS (our transmitted waveform decodes correctly)"
+                               : "MISMATCH - FAIL");
+                if (match) id(exp_expect_code) = 0;   // stops E15 reporting a timeout
+              }
+            } else {
+              ESP_LOGW("RF_ANALYZE", "  A-OK pair structure breaks at bit %d - degraded capture, do not use", bad_at);
+            }
+          }
 
           // Emit the grid-snapped waveform, chunked to stay inside the log buffer.
           std::string line;
@@ -792,6 +859,385 @@ button:
             times: 12
             wait_time: 5065us
 
+  #################### VALIDATION EXPERIMENTS ####################
+  # Each button runs one experiment and logs an "EXP" block naming the
+  # experiment, a per-experiment trial counter, and exactly what was
+  # transmitted (fields, 64-bit code, checksum, and waveform parameters).
+  # Press a button, observe the covers, and report the outcome per trial.
+  #
+  # A-OK frames are SYNTHESISED from fields, not replayed from a capture:
+  #   64 bits = [32-bit ID][8-bit channel][8-bit pad 0x00][8-bit cmd][8-bit checksum]
+  #   checksum = (sum of the first 7 bytes + 0x5D) & 0xFF
+  #   cmd 0x0B = UP/open, 0x43 = DOWN/close, 0x23 = STOP
+  #   bit 0 = (1T mark, 2T space), bit 1 = (2T mark, 1T space), T ~= 300us
+  #   frame  = [5000us mark][2T space][64 bits][2T mark]
+  # Known transmitters: 0xA3C86E2C ch1=Sofia ch2=Elia (current 2-channel remote)
+  #                     0xA3C056FF ch8       (older 8-channel remote)
+
+  # --- Group A: does the synthesis + checksum model actually hold? ---
+
+  # E1 is the decisive test of the checksum rule: this exact code was NEVER
+  # captured from any remote. Its checksum (0x87) is derived purely from the
+  # rule. If Elia stops, the rule and the whole field model are confirmed.
+  - platform: template
+    name: "EXP E1 Synth Elia STOP (never captured)"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: aok_tx
+          exp: "E1"
+          note: "Synthesised Elia STOP, checksum 0x87 derived from the rule, never captured. EXPECT: Elia stops (press while Elia is moving)."
+          id_sel: 0
+          channel: 2
+          cmd: 0x23
+          t_us: 299
+          hdr_us: 5000
+          hdr_space_us: 0
+          gap_us: 5000
+          times: 12
+          trailer: 1
+          cks_delta: 0
+
+  # E2 reproduces a code we DID capture, but built from fields instead of
+  # replayed. Software says the waveform is bit-identical; this checks that on air.
+  - platform: template
+    name: "EXP E2 Synth Elia CLOSE (matches capture)"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: aok_tx
+          exp: "E2"
+          note: "Synthesised Elia CLOSE, should be bit-identical to the captured waveform. EXPECT: Elia closes, as reliably as the normal button."
+          id_sel: 0
+          channel: 2
+          cmd: 0x43
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 12
+          trailer: 1
+          cks_delta: 0
+
+  # E3 is a NEGATIVE control. Identical to E2 but with the checksum off by one.
+  # If Elia still closes, the motor ignores the checksum and our "explainable"
+  # model is weaker than claimed.
+  - platform: template
+    name: "EXP E3 Elia CLOSE with BAD checksum"
+    icon: mdi:flask-off
+    on_press:
+      - script.execute:
+          id: aok_tx
+          exp: "E3"
+          note: "NEGATIVE CONTROL: Elia CLOSE with checksum deliberately +1. EXPECT: nothing happens. If it closes, the motor does not verify the checksum."
+          id_sel: 0
+          channel: 2
+          cmd: 0x43
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 12
+          trailer: 1
+          cks_delta: 1
+
+  # E4/E5 test the channel byte in isolation: same ID, same command, only the
+  # channel differs. They should address different covers.
+  - platform: template
+    name: "EXP E4 UP on channel 1"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: aok_tx
+          exp: "E4"
+          note: "UP with channel=1. EXPECT: SOFIA opens and Elia does NOT move."
+          id_sel: 0
+          channel: 1
+          cmd: 0x0B
+          t_us: 302
+          hdr_us: 5105
+          hdr_space_us: 0
+          gap_us: 5105
+          times: 12
+          trailer: 1
+          cks_delta: 0
+
+  - platform: template
+    name: "EXP E5 UP on channel 2"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: aok_tx
+          exp: "E5"
+          note: "UP with channel=2. EXPECT: ELIA opens and Sofia does NOT move."
+          id_sel: 0
+          channel: 2
+          cmd: 0x0B
+          t_us: 302
+          hdr_us: 5114
+          hdr_space_us: 0
+          gap_us: 5114
+          times: 12
+          trailer: 1
+          cks_delta: 0
+
+  # --- Group B: the older 8-channel remote ---
+
+  # The captured "Elia stop" actually came from transmitter 0xA3C056FF channel 8,
+  # and it works - so Elia is still paired with that older remote. E6 checks
+  # whether that pairing accepts other commands too, or only STOP.
+  - platform: template
+    name: "EXP E6 Old 8ch remote UP (ID A3C056FF ch8)"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: aok_tx
+          exp: "E6"
+          note: "UP from the OLD 8-channel remote's ID/channel. EXPECT: if Elia is still fully paired with it, Elia opens. Note which cover (if any) reacts."
+          id_sel: 1
+          channel: 8
+          cmd: 0x0B
+          t_us: 299
+          hdr_us: 5000
+          hdr_space_us: 0
+          gap_us: 5000
+          times: 12
+          trailer: 1
+          cks_delta: 0
+
+
+  # --- Group C: why does Elia CLOSE occasionally fail? ---
+  # Run each of E7-E10 about 10 times and report how many worked, so the rates
+  # are comparable. E8 is the current firmware's behaviour (the baseline).
+
+  # E7 replays the ORIGINAL un-quantised capture, including the Tuya receiver's
+  # measurement spread (1T reported as both 272 and 317us here).
+  - platform: template
+    name: "EXP E7 Elia CLOSE verbatim capture"
+    icon: mdi:flask
+    on_press:
+      - lambda: |-
+          id(exp_trial)++;
+          ESP_LOGI("EXP", "E7 trial=%d | Elia CLOSE, ORIGINAL un-quantised timings (1T spread 272/317us). Run ~10x and report success count.", id(exp_trial));
+          ESP_LOGI("EXP", "  items=131 gap=5115us repeats=12 (verbatim, not synthesised)");
+      - remote_transmitter.transmit_raw:
+          transmitter_id: rf_transmitter
+          carrier_frequency: 0Hz
+          code: [
+                  5115, -609, 609, -272, 272, -609, 609, -272, 317, -609, 317, -609, 317, -609, 609, -272, 609,
+                  -272, 609, -272, 609, -272, 272, -609, 317, -609, 609, -272, 272, -609, 317, -609, 272, -609,
+                  317, -609, 609, -272, 609, -272, 317, -609, 609, -272, 609, -272, 609, -272, 317, -609, 272,
+                  -609, 317, -609, 609, -272, 317, -609, 609, -272, 609, -272, 272, -609, 317, -609, 317, -609,
+                  272, -609, 317, -609, 317, -609, 317, -609, 272, -609, 609, -272, 272, -609, 272, -609, 317,
+                  -609, 272, -609, 317, -609, 272, -609, 272, -609, 317, -609, 317, -609, 317, -609, 609, -272,
+                  317, -609, 272, -609, 317, -609, 272, -609, 609, -272, 609, -272, 609, -272, 272, -609, 609,
+                  -272, 272, -609, 272, -609, 609, -272, 609, -272, 609, -272, 609
+          ]
+          repeat:
+            times: 12
+            wait_time: 5115us
+
+
+  - platform: template
+    name: "EXP E8 Elia CLOSE snapped, 12 reps (baseline)"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: aok_tx
+          exp: "E8"
+          note: "BASELINE - identical to what the normal Elia Close button does. Run ~10x and report success count."
+          id_sel: 0
+          channel: 2
+          cmd: 0x43
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 12
+          trailer: 1
+          cks_delta: 0
+
+  - platform: template
+    name: "EXP E9 Elia CLOSE snapped, 30 reps"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: aok_tx
+          exp: "E9"
+          note: "Same as E8 but 30 repeats. Tests whether failures are marginal RF that more repeats fixes. Run ~10x and report success count."
+          id_sel: 0
+          channel: 2
+          cmd: 0x43
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 30
+          trailer: 1
+          cks_delta: 0
+
+  # E10 pauses BLE scanning around the transmission. bluetooth_proxy and the BLE
+  # tracker are active on this device and compete for radio/CPU time.
+  - platform: template
+    name: "EXP E10 Elia CLOSE with BLE paused"
+    icon: mdi:flask
+    on_press:
+      - esp32_ble_tracker.stop_scan:
+      - delay: 300ms
+      - script.execute:
+          id: aok_tx
+          exp: "E10"
+          note: "Same as E8 but with BLE scanning stopped first. Tests BLE/WiFi interference. Run ~10x and report success count. BLE restarts automatically after."
+          id_sel: 0
+          channel: 2
+          cmd: 0x43
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - delay: 3s
+      - esp32_ble_tracker.start_scan:
+          continuous: true
+
+  # --- Group D: which parts of the frame are actually required? ---
+
+  - platform: template
+    name: "EXP E11 Elia CLOSE without trailing mark"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: aok_tx
+          exp: "E11"
+          note: "Elia CLOSE with the final 2T mark omitted. EXPECT: if it still works, the trailer is decorative. Run ~10x."
+          id_sel: 0
+          channel: 2
+          cmd: 0x43
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 12
+          trailer: 0
+          cks_delta: 0
+
+  # The captures start with two identical ~5000us values, so it was ambiguous
+  # whether the first is an inter-frame gap or part of the header. Variant A
+  # (gap + 5000 mark + 2T space) is what ships. E12 sends variant B instead.
+  - platform: template
+    name: "EXP E12 Elia CLOSE header variant B"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: aok_tx
+          exp: "E12"
+          note: "Elia CLOSE with a 5115us header SPACE instead of 2T. Tests the header ambiguity directly. Run ~10x."
+          id_sel: 0
+          channel: 2
+          cmd: 0x43
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 5115
+          gap_us: 5115
+          times: 12
+          trailer: 1
+          cks_delta: 0
+
+
+  # --- Group E: is Sublimex really plain Dooya? ---
+  # This uses ESPHome's OWN built-in Dooya encoder with the decoded fields,
+  # not our captured waveform. If Dormitorio opens, the Dooya decode
+  # (id/channel/button) is confirmed and those covers need no stored waveform.
+  - platform: template
+    name: "EXP E13 Dormitorio OPEN via native Dooya"
+    icon: mdi:flask
+    on_press:
+      - lambda: |-
+          id(exp_trial)++;
+          ESP_LOGI("EXP", "E13 trial=%d | Dormitorio OPEN using ESPHome's native Dooya encoder", id(exp_trial));
+          ESP_LOGI("EXP", "  id=0xC389EB channel=5 button=1 check=1 (button 1=up/open)");
+          ESP_LOGI("EXP", "  EXPECT: Dormitorio opens. Confirms Sublimex == Dooya and that no captured waveform is needed.");
+      - remote_transmitter.transmit_dooya:
+          transmitter_id: rf_transmitter
+          id: 0xC389EB
+          channel: 5
+          button: 1
+          check: 1
+
+  # --- Group F: would the original nbits fix have been enough? ---
+  # The stock firmware decoded the A-OK frame CORRECTLY as 64 bits via rc_switch
+  # protocol 6 (its inverted short/long structure matches A-OK's distance
+  # coding); it only failed because playback hardcoded 24 bits. E14 replays the
+  # same code through protocol 6's ENCODER at the full 64 bits. Protocol 6 uses
+  # 450/900us where A-OK uses ~300/600us, so this also probes how much timing
+  # error the motor tolerates.
+  - platform: template
+    name: "EXP E14 Elia CLOSE via rc_switch proto 6, 64 bits"
+    icon: mdi:flask
+    on_press:
+      - lambda: |-
+          id(exp_trial)++;
+          ESP_LOGI("EXP", "E14 trial=%d | Elia CLOSE via rc_switch protocol 6 encoder at 64 bits", id(exp_trial));
+          ESP_LOGI("EXP", "  code=0xA3C86E2C020043A7 nbits=64");
+          ESP_LOGI("EXP", "  proto 6 emits 450/900us bits vs A-OK's ~300/600us - also a timing-tolerance probe.");
+          ESP_LOGI("EXP", "  EXPECT: if Elia closes, storing nbits=64 would have been enough on the stock firmware.");
+      - remote_transmitter.transmit_rc_switch_raw:
+          transmitter_id: rf_transmitter
+          protocol: 6
+          code: "1010001111001000011011100010110000000010000000000100001110100111"
+          repeat:
+            times: 12
+            wait_time: 5115us
+
+  # --- Group G: automatic self-check (no observation needed) ---
+  # Transmits a known code with the analyser armed, so the device's own receiver
+  # decodes what it just sent. This validates the transmitted waveform end to end
+  # and reports PASS/FAIL in the log by itself. It also tells us whether the
+  # receive path works at all, which decides if learning from the remote is viable.
+  - platform: template
+    name: "EXP E15 Loopback self-test"
+    icon: mdi:sync
+    on_press:
+      - lambda: |-
+          id(exp_trial)++;
+          id(rf_analyze_mode) = true;
+          id(exp_expect_code) = 0xA3C86E2C020043A7ULL;
+          ESP_LOGI("EXP", "E15 trial=%d | Loopback: transmitting Elia CLOSE with the analyser armed", id(exp_trial));
+          ESP_LOGI("EXP", "  expecting the receiver to decode 0xA3C86E2C020043A7 back");
+          ESP_LOGI("EXP", "  Look for an RF_ANALYZE LOOPBACK line - it reports PASS/FAIL automatically.");
+      - script.execute:
+          id: aok_tx
+          exp: "E15"
+          note: "loopback transmission"
+          id_sel: 0
+          channel: 2
+          cmd: 0x43
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - delay: 4s
+      - lambda: |-
+          if (id(exp_expect_code) != 0) {
+            ESP_LOGW("EXP", "E15 RESULT: FAIL - the receiver never decoded a valid A-OK frame from our own transmission.");
+            ESP_LOGW("EXP", "  => the RX path cannot hear this protocol here, so learning from the remote is unlikely to work.");
+          }
+          id(exp_expect_code) = 0;
+          id(rf_analyze_mode) = false;
+
+  - platform: template
+    name: "EXP Reset trial counter"
+    icon: mdi:counter
+    on_press:
+      - lambda: |-
+          id(exp_trial) = 0;
+          ESP_LOGI("EXP", "Trial counter reset to 0");
+
 
 
 switch:
@@ -927,6 +1373,71 @@ select:
 
 # Script for sending raw IR signals
 script:
+  # Builds an A-OK frame from its fields and transmits it. Everything about the
+  # waveform is derived from the parameters, so nothing is replayed from a
+  # capture - this is what makes the experiments reproducible and explainable.
+  - id: aok_tx
+    mode: single
+    parameters:
+      exp: string
+      note: string
+      id_sel: int        # 0 = 0xA3C86E2C (current 2-ch remote), 1 = 0xA3C056FF (old 8-ch)
+      channel: int
+      cmd: int
+      t_us: int
+      hdr_us: int
+      hdr_space_us: int  # 0 => use 2*T (the normal header low)
+      gap_us: int
+      times: int
+      trailer: int       # 1 => append the final 2T mark
+      cks_delta: int     # 0 => correct checksum; non-zero corrupts it on purpose
+    then:
+      - lambda: |-
+          static const uint32_t IDS[2] = {0xA3C86E2CUL, 0xA3C056FFUL};
+          uint32_t dev = IDS[id_sel & 1];
+
+          uint8_t b[8];
+          b[0] = (uint8_t) (dev >> 24); b[1] = (uint8_t) (dev >> 16);
+          b[2] = (uint8_t) (dev >> 8);  b[3] = (uint8_t) dev;
+          b[4] = (uint8_t) channel; b[5] = 0x00; b[6] = (uint8_t) cmd;
+          int s = 0;
+          for (int i = 0; i < 7; i++) s += b[i];
+          b[7] = (uint8_t) ((s + 0x5D + cks_delta) & 0xFF);
+
+          uint64_t code = 0;
+          for (int i = 0; i < 8; i++) code = (code << 8) | b[i];
+
+          int hdr_low = (hdr_space_us > 0) ? hdr_space_us : 2 * t_us;
+          std::vector<int32_t> w;
+          w.reserve(2 + 128 + 1);
+          w.push_back(hdr_us);
+          w.push_back(-hdr_low);
+          for (int i = 0; i < 8; i++) {
+            for (int bit = 7; bit >= 0; bit--) {
+              if ((b[i] >> bit) & 1) { w.push_back(2 * t_us); w.push_back(-t_us); }
+              else                   { w.push_back(t_us);     w.push_back(-2 * t_us); }
+            }
+          }
+          if (trailer) w.push_back(2 * t_us);
+
+          id(exp_buf) = w;
+          id(exp_times) = (uint32_t) times;
+          id(exp_gap) = (uint32_t) gap_us;
+          id(exp_trial)++;
+
+          ESP_LOGI("EXP", "%s trial=%d | %s", exp.c_str(), id(exp_trial), note.c_str());
+          ESP_LOGI("EXP", "  ID=0x%08X ch=%d pad=0x00 cmd=0x%02X cksum=0x%02X%s  code=0x%016llX",
+                   (unsigned) dev, channel, (unsigned) b[6], (unsigned) b[7],
+                   cks_delta ? " (DELIBERATELY WRONG)" : "", (unsigned long long) code);
+          ESP_LOGI("EXP", "  T=%dus hdr=%dus/%dus gap=%dus repeats=%d trailer=%s items=%d",
+                   t_us, hdr_us, hdr_low, gap_us, times, trailer ? "yes" : "no", (int) w.size());
+      - remote_transmitter.transmit_raw:
+          transmitter_id: rf_transmitter
+          carrier_frequency: 0Hz
+          code: !lambda 'return id(exp_buf);'
+          repeat:
+            times: !lambda 'return id(exp_times);'
+            wait_time: !lambda 'return id(exp_gap);'
   - id: send_raw_signal
     then:
       - lambda: |-
