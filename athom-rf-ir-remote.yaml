@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.1.0"
+  project_version: "v3.2.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -107,6 +107,28 @@ globals:
   # Gates the protocol-aware capture analyser on the RF receiver (see below).
   # Off by default so ambient 433 MHz traffic does not fill the log.
   - id: rf_analyze_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Verbose waveform dump, separate from learning and off by default: it is what
+  # flooded the log during round 1.
+  - id: rf_raw_debug
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Rejected captures are counted, not printed, and summarised at most once per
+  # 10s so noise stays visible without drowning real results.
+  - id: rf_noise_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: rf_noise_last
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # Alternates the stop-probe direction so the shutter oscillates mid-travel and
+  # never parks at a limit where a command would look like a failure.
+  - id: probe_dir
     type: bool
     restore_value: no
     initial_value: 'false'
@@ -230,10 +252,10 @@ remote_receiver:
   - pin:
       number: ${RF_RX_PIN}
       inverted: true
-    dump: rc_switch
-    # RF433 fixed-code decoding: filter glitches, split frames on 4ms idle,
-    # and widen tolerance for cheap remotes. rc_switch decoding rejects the
-    # receiver's ambient noise, so learning no longer false-triggers.
+    # NOTE: no `dump:` here on purpose. ESPHome's rc_switch dumper prints a line
+    # for every burst it can decode, including ambient noise, which flooded the
+    # log badly enough to truncate real results. All logging below is gated on a
+    # frame actually validating, so only real remotes produce output.
     filter: 4us
     idle: 4ms
     tolerance: 50%
@@ -251,7 +273,7 @@ remote_receiver:
     # a transmit_raw button - which is how the codes further down were cleaned.
     on_raw:
       - lambda: |-
-          if (!id(rf_analyze_mode))
+          if (!id(rf_raw_debug))
             return;
           size_t n = x.size();
           if (n < 40) return;                       // ignore short noise bursts
@@ -303,6 +325,20 @@ remote_receiver:
             else                             verdict = "on-grid, but unexpected symbol count";
           } else {
             verdict = "DEGRADED - off-grid symbols, do not trust";
+          }
+          // Junk is counted and summarised, never printed in full. Only a
+          // capture that passes validation gets a verdict line and a waveform.
+          bool plausible = (cother == 0 && maxres < (int) (T * 0.25f) && body.size() >= 60);
+          if (!plausible) {
+            id(rf_noise_count)++;
+            uint32_t now = millis();
+            if (now - id(rf_noise_last) > 10000) {
+              ESP_LOGD("RF_RAW", "suppressed %d noisy/degraded captures in the last 10s",
+                       id(rf_noise_count));
+              id(rf_noise_count) = 0;
+              id(rf_noise_last) = now;
+            }
+            return;
           }
           ESP_LOGI("RF_ANALYZE", "items=%d header=%d symbols=%d T=%.1fus 1T=%d 2T=%d other=%d maxresid=%dus -> %s",
                    (int) n, header_items, (int) body.size(), T, c1, c2, cother, maxres, verdict);
@@ -379,10 +415,41 @@ remote_receiver:
       - lambda: |-
           if (!id(rf_analyze_mode))
             return;
-          ESP_LOGI("RF_ANALYZE", "DOOYA decoded: id=0x%06X channel=%d button=%d check=%d",
+          const char *bn = x.button == 1 ? "UP/open" : x.button == 3 ? "DOWN/close" :
+                           x.button == 5 ? "STOP" : "?";
+          const char *known = (x.id == 0xC389EB) ? "  (= Dormitorio)" :
+                              (x.id == 0xC089B7) ? "  (= Sala)" : "  (NEW remote/cover)";
+          ESP_LOGI("RF_LEARN", "DOOYA id=0x%06X channel=%d button=%d(%s) check=%d%s",
+                   (unsigned int) x.id, (int) x.channel, (int) x.button, bn, (int) x.check, known);
+          ESP_LOGI("RF_LEARN", "  -> transmit_dooya: id=0x%06X, channel=%d, button=%d, check=%d",
                    (unsigned int) x.id, (int) x.channel, (int) x.button, (int) x.check);
     on_rc_switch:
       - lambda: |-
+          // A-OK learning. rc_switch protocol 6 happens to be the same
+          // pulse-distance scheme A-OK uses, so it decodes these frames
+          // correctly at 64 bits. rc_switch cannot report the bit count, but we
+          // do not need it: the checksum only validates if all 64 bits arrived,
+          // so a passing checksum IS the completeness check. Only valid frames
+          // are logged, which keeps ambient noise out of the log entirely.
+          if (id(rf_analyze_mode)) {
+            uint64_t code = x.code;
+            uint8_t by[8];
+            for (int i = 0; i < 8; i++) by[i] = (uint8_t) (code >> (56 - 8 * i));
+            int sum = 0;
+            for (int i = 0; i < 7; i++) sum += by[i];
+            uint8_t calc = (uint8_t) ((sum + 0x5D) & 0xFF);
+            if (calc == by[7]) {
+              const char *cn = by[6] == 0x0B ? "UP"   : by[6] == 0x43 ? "DOWN" :
+                               by[6] == 0x23 ? "STOP" : "?";
+              ESP_LOGI("RF_LEARN", "A-OK  code=0x%016llX  ID=0x%08X ch=%d cmd=0x%02X(%s)  CHECKSUM OK",
+                       (unsigned long long) code,
+                       (unsigned) (((uint32_t) by[0] << 24) | ((uint32_t) by[1] << 16) |
+                                   ((uint32_t) by[2] << 8) | by[3]),
+                       (int) by[4], (int) by[6], cn);
+            } else {
+              id(rf_noise_count)++;
+            }
+          }
           if (id(is_rf_learning_mode)) {
             std::vector<int> d;
             d.push_back((int) x.protocol);
@@ -605,6 +672,7 @@ button:
   # Sublimex DC1600 (Dooya id=0xC389EB ch=5 button=1), captured at 433.3 MHz - verbatim
   - platform: template
     name: "Dormitorio Open"
+    id: btn_dormitorio_open
     icon: mdi:arrow-up-bold-box
     on_press:
       - remote_transmitter.transmit_raw:
@@ -859,34 +927,36 @@ button:
             times: 12
             wait_time: 5065us
 
-  #################### VALIDATION EXPERIMENTS ####################
-  # Each button runs one experiment and logs an "EXP" block naming the
-  # experiment, a per-experiment trial counter, and exactly what was
-  # transmitted (fields, 64-bit code, checksum, and waveform parameters).
-  # Press a button, observe the covers, and report the outcome per trial.
+
+  #################### ROUND 2 EXPERIMENTS ####################
+  # Round 1 was confounded: a CLOSE sent to an already-closed shutter is
+  # indistinguishable from a failed transmission, and running 30 commands in a
+  # row tripped the motor's thermal cutout. Both made "nothing happened"
+  # ambiguous, so every 0/N result was uninterpretable.
   #
-  # A-OK frames are SYNTHESISED from fields, not replayed from a capture:
-  #   64 bits = [32-bit ID][8-bit channel][8-bit pad 0x00][8-bit cmd][8-bit checksum]
-  #   checksum = (sum of the first 7 bytes + 0x5D) & 0xFF
-  #   cmd 0x0B = UP/open, 0x43 = DOWN/close, 0x23 = STOP
-  #   bit 0 = (1T mark, 2T space), bit 1 = (2T mark, 1T space), T ~= 300us
-  #   frame  = [5000us mark][2T space][64 bits][2T mark]
-  # Known transmitters: 0xA3C86E2C ch1=Sofia ch2=Elia (current 2-channel remote)
-  #                     0xA3C056FF ch8       (older 8-channel remote)
+  # Round 2 uses STOP as the probe instead. Each button automatically moves the
+  # shutter with a known-good command, waits, then sends the EXPERIMENTAL stop.
+  # "Did it halt?" is unambiguous regardless of where the shutter was, and each
+  # trial is a short partial travel, so the motor stays cool.
+  # The mover alternates open/close every trial, so the shutter oscillates
+  # mid-travel and never parks at a limit.
+  #
+  # Pace: leave a few seconds between presses, and take a 2-3 minute break every
+  # ~10 trials. If a run starts failing consistently after many trials, suspect
+  # the thermal cutout and rest the motor before continuing.
+  # Press "EXP Reset trial counter" before each experiment.
 
-  # --- Group A: does the synthesis + checksum model actually hold? ---
 
-  # E1 is the decisive test of the checksum rule: this exact code was NEVER
-  # captured from any remote. Its checksum (0x87) is derived purely from the
-  # rule. If Elia stops, the rule and the whole field model are confirmed.
   - platform: template
-    name: "EXP E1 Synth Elia STOP (never captured)"
+    name: "EXP R1 STOP baseline"
     icon: mdi:flask
     on_press:
+      - script.execute: probe_move
+      - script.wait: probe_move
       - script.execute:
           id: aok_tx
-          exp: "E1"
-          note: "Synthesised Elia STOP, checksum 0x87 derived from the rule, never captured. EXPECT: Elia stops (press while Elia is moving)."
+          exp: "R1"
+          note: "stop probe"
           id_sel: 0
           channel: 2
           cmd: 0x23
@@ -897,106 +967,227 @@ button:
           times: 12
           trailer: 1
           cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 2500ms
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R1 baseline: canonical synthesised STOP - the reference for R2-R9");
+          ESP_LOGI("EXP", "    PASS = shutter halted early. FAIL = ran to the end.");
+          ESP_LOGI("EXP", "    If it never moved at all, mark the trial VOID (mover missed).");
 
-  # E2 reproduces a code we DID capture, but built from fields instead of
-  # replayed. Software says the waveform is bit-identical; this checks that on air.
+
   - platform: template
-    name: "EXP E2 Synth Elia CLOSE (matches capture)"
+    name: "EXP R2 STOP verbatim capture"
     icon: mdi:flask
     on_press:
+      - script.execute: probe_move
+      - script.wait: probe_move
+      - remote_transmitter.transmit_raw:
+          transmitter_id: rf_transmitter
+          carrier_frequency: 0Hz
+          code: [
+                  5000, -606, 606, -273, 273, -606, 606, -323, 273, -606, 273, -606, 273, -606, 606, -273, 606,
+                  -273, 606, -273, 606, -273, 273, -606, 273, -606, 273, -606, 273, -606, 273, -606, 273, -606,
+                  323, -606, 606, -273, 273, -606, 606, -273, 273, -606, 606, -273, 606, -273, 273, -606, 606,
+                  -273, 606, -323, 606, -323, 606, -273, 606, -323, 606, -273, 606, -273, 606, -273, 273, -606,
+                  273, -606, 273, -606, 273, -606, 606, -273, 273, -606, 273, -606, 323, -606, 273, -606, 273,
+                  -606, 323, -606, 273, -606, 273, -606, 273, -606, 323, -606, 273, -606, 273, -606, 273, -606,
+                  606, -273, 273, -606, 273, -606, 273, -606, 606, -273, 606, -323, 273, -606, 606, -273, 273,
+                  -606, 323, -606, 273, -606, 273, -606, 273, -606, 273, -606, 606
+          ]
+          repeat:
+            times: 12
+            wait_time: 5000us
+      - delay: 2500ms
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R2 verbatim: old-remote STOP replayed with the Tuya capture's raw jitter");
+          ESP_LOGI("EXP", "    PASS = shutter halted early. FAIL = ran to the end.");
+          ESP_LOGI("EXP", "    If it never moved at all, mark the trial VOID (mover missed).");
+
+
+  - platform: template
+    name: "EXP R3 STOP grid-snapped"
+    icon: mdi:flask
+    on_press:
+      - script.execute: probe_move
+      - script.wait: probe_move
+      - remote_transmitter.transmit_raw:
+          transmitter_id: rf_transmitter
+          carrier_frequency: 0Hz
+          code: [
+                  5000, -598, 598, -299, 299, -598, 598, -299, 299, -598, 299, -598, 299, -598, 598, -299, 598,
+                  -299, 598, -299, 598, -299, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598,
+                  299, -598, 598, -299, 299, -598, 598, -299, 299, -598, 598, -299, 598, -299, 299, -598, 598,
+                  -299, 598, -299, 598, -299, 598, -299, 598, -299, 598, -299, 598, -299, 598, -299, 299, -598,
+                  299, -598, 299, -598, 299, -598, 598, -299, 299, -598, 299, -598, 299, -598, 299, -598, 299,
+                  -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598,
+                  598, -299, 299, -598, 299, -598, 299, -598, 598, -299, 598, -299, 299, -598, 598, -299, 299,
+                  -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 598
+          ]
+          repeat:
+            times: 12
+            wait_time: 5000us
+      - delay: 2500ms
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R3 snapped: same old-remote STOP, symbols snapped to T=299us. Compare with R2 - this is the direct test of whether grid-snapping helps");
+          ESP_LOGI("EXP", "    PASS = shutter halted early. FAIL = ran to the end.");
+          ESP_LOGI("EXP", "    If it never moved at all, mark the trial VOID (mover missed).");
+
+
+  - platform: template
+    name: "EXP R4 STOP 4 repeats"
+    icon: mdi:flask
+    on_press:
+      - script.execute: probe_move
+      - script.wait: probe_move
       - script.execute:
           id: aok_tx
-          exp: "E2"
-          note: "Synthesised Elia CLOSE, should be bit-identical to the captured waveform. EXPECT: Elia closes, as reliably as the normal button."
+          exp: "R4"
+          note: "stop probe"
           id_sel: 0
           channel: 2
-          cmd: 0x43
-          t_us: 301
-          hdr_us: 5115
+          cmd: 0x23
+          t_us: 299
+          hdr_us: 5000
           hdr_space_us: 0
-          gap_us: 5115
+          gap_us: 5000
+          times: 4
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 2500ms
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R4: only 4 repeats instead of 12 - does repeat count matter?");
+          ESP_LOGI("EXP", "    PASS = shutter halted early. FAIL = ran to the end.");
+          ESP_LOGI("EXP", "    If it never moved at all, mark the trial VOID (mover missed).");
+
+
+  - platform: template
+    name: "EXP R5 STOP 30 repeats"
+    icon: mdi:flask
+    on_press:
+      - script.execute: probe_move
+      - script.wait: probe_move
+      - script.execute:
+          id: aok_tx
+          exp: "R5"
+          note: "stop probe"
+          id_sel: 0
+          channel: 2
+          cmd: 0x23
+          t_us: 299
+          hdr_us: 5000
+          hdr_space_us: 0
+          gap_us: 5000
+          times: 30
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 2500ms
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R5: 30 repeats - if better than R1, failures are marginal RF");
+          ESP_LOGI("EXP", "    PASS = shutter halted early. FAIL = ran to the end.");
+          ESP_LOGI("EXP", "    If it never moved at all, mark the trial VOID (mover missed).");
+
+
+  - platform: template
+    name: "EXP R7 STOP no trailer"
+    icon: mdi:flask
+    on_press:
+      - script.execute: probe_move
+      - script.wait: probe_move
+      - script.execute:
+          id: aok_tx
+          exp: "R7"
+          note: "stop probe"
+          id_sel: 0
+          channel: 2
+          cmd: 0x23
+          t_us: 299
+          hdr_us: 5000
+          hdr_space_us: 0
+          gap_us: 5000
+          times: 12
+          trailer: 0
+          cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 2500ms
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R7: final 2T mark omitted - is the trailer required?");
+          ESP_LOGI("EXP", "    PASS = shutter halted early. FAIL = ran to the end.");
+          ESP_LOGI("EXP", "    If it never moved at all, mark the trial VOID (mover missed).");
+
+
+  - platform: template
+    name: "EXP R8 STOP header variant B"
+    icon: mdi:flask
+    on_press:
+      - script.execute: probe_move
+      - script.wait: probe_move
+      - script.execute:
+          id: aok_tx
+          exp: "R8"
+          note: "stop probe"
+          id_sel: 0
+          channel: 2
+          cmd: 0x23
+          t_us: 299
+          hdr_us: 5000
+          hdr_space_us: 5000
+          gap_us: 5000
           times: 12
           trailer: 1
           cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 2500ms
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R8: 5000us header SPACE instead of 2T - settles the header ambiguity");
+          ESP_LOGI("EXP", "    PASS = shutter halted early. FAIL = ran to the end.");
+          ESP_LOGI("EXP", "    If it never moved at all, mark the trial VOID (mover missed).");
 
-  # E3 is a NEGATIVE control. Identical to E2 but with the checksum off by one.
-  # If Elia still closes, the motor ignores the checksum and our "explainable"
-  # model is weaker than claimed.
+
   - platform: template
-    name: "EXP E3 Elia CLOSE with BAD checksum"
+    name: "EXP R10 STOP bad checksum"
     icon: mdi:flask-off
     on_press:
+      - script.execute: probe_move
+      - script.wait: probe_move
       - script.execute:
           id: aok_tx
-          exp: "E3"
-          note: "NEGATIVE CONTROL: Elia CLOSE with checksum deliberately +1. EXPECT: nothing happens. If it closes, the motor does not verify the checksum."
+          exp: "R10"
+          note: "stop probe"
           id_sel: 0
           channel: 2
-          cmd: 0x43
-          t_us: 301
-          hdr_us: 5115
+          cmd: 0x23
+          t_us: 299
+          hdr_us: 5000
           hdr_space_us: 0
-          gap_us: 5115
+          gap_us: 5000
           times: 12
           trailer: 1
           cks_delta: 1
+      - script.wait: aok_tx
+      - delay: 2500ms
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R10 NEGATIVE CONTROL: checksum deliberately +1. Here PASS/FAIL is inverted - the shutter SHOULD run to the end. If it halts, the motor ignores the checksum");
+          ESP_LOGI("EXP", "    PASS = shutter halted early. FAIL = ran to the end.");
+          ESP_LOGI("EXP", "    If it never moved at all, mark the trial VOID (mover missed).");
 
-  # E4/E5 test the channel byte in isolation: same ID, same command, only the
-  # channel differs. They should address different covers.
-  - platform: template
-    name: "EXP E4 UP on channel 1"
-    icon: mdi:flask
-    on_press:
-      - script.execute:
-          id: aok_tx
-          exp: "E4"
-          note: "UP with channel=1. EXPECT: SOFIA opens and Elia does NOT move."
-          id_sel: 0
-          channel: 1
-          cmd: 0x0B
-          t_us: 302
-          hdr_us: 5105
-          hdr_space_us: 0
-          gap_us: 5105
-          times: 12
-          trailer: 1
-          cks_delta: 0
 
   - platform: template
-    name: "EXP E5 UP on channel 2"
+    name: "EXP R6 STOP with BLE paused"
     icon: mdi:flask
     on_press:
+      - esp32_ble_tracker.stop_scan:
+      - delay: 300ms
+      - script.execute: probe_move
+      - script.wait: probe_move
       - script.execute:
           id: aok_tx
-          exp: "E5"
-          note: "UP with channel=2. EXPECT: ELIA opens and Sofia does NOT move."
+          exp: "R6"
+          note: "stop probe"
           id_sel: 0
           channel: 2
-          cmd: 0x0B
-          t_us: 302
-          hdr_us: 5114
-          hdr_space_us: 0
-          gap_us: 5114
-          times: 12
-          trailer: 1
-          cks_delta: 0
-
-  # --- Group B: the older 8-channel remote ---
-
-  # The captured "Elia stop" actually came from transmitter 0xA3C056FF channel 8,
-  # and it works - so Elia is still paired with that older remote. E6 checks
-  # whether that pairing accepts other commands too, or only STOP.
-  - platform: template
-    name: "EXP E6 Old 8ch remote UP (ID A3C056FF ch8)"
-    icon: mdi:flask
-    on_press:
-      - script.execute:
-          id: aok_tx
-          exp: "E6"
-          note: "UP from the OLD 8-channel remote's ID/channel. EXPECT: if Elia is still fully paired with it, Elia opens. Note which cover (if any) reacts."
-          id_sel: 1
-          channel: 8
-          cmd: 0x0B
+          cmd: 0x23
           t_us: 299
           hdr_us: 5000
           hdr_space_us: 0
@@ -1004,231 +1195,59 @@ button:
           times: 12
           trailer: 1
           cks_delta: 0
-
-
-  # --- Group C: why does Elia CLOSE occasionally fail? ---
-  # Run each of E7-E10 about 10 times and report how many worked, so the rates
-  # are comparable. E8 is the current firmware's behaviour (the baseline).
-
-  # E7 replays the ORIGINAL un-quantised capture, including the Tuya receiver's
-  # measurement spread (1T reported as both 272 and 317us here).
-  - platform: template
-    name: "EXP E7 Elia CLOSE verbatim capture"
-    icon: mdi:flask
-    on_press:
+      - script.wait: aok_tx
+      - delay: 2500ms
       - lambda: |-
-          id(exp_trial)++;
-          ESP_LOGI("EXP", "E7 trial=%d | Elia CLOSE, ORIGINAL un-quantised timings (1T spread 272/317us). Run ~10x and report success count.", id(exp_trial));
-          ESP_LOGI("EXP", "  items=131 gap=5115us repeats=12 (verbatim, not synthesised)");
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5115, -609, 609, -272, 272, -609, 609, -272, 317, -609, 317, -609, 317, -609, 609, -272, 609,
-                  -272, 609, -272, 609, -272, 272, -609, 317, -609, 609, -272, 272, -609, 317, -609, 272, -609,
-                  317, -609, 609, -272, 609, -272, 317, -609, 609, -272, 609, -272, 609, -272, 317, -609, 272,
-                  -609, 317, -609, 609, -272, 317, -609, 609, -272, 609, -272, 272, -609, 317, -609, 317, -609,
-                  272, -609, 317, -609, 317, -609, 317, -609, 272, -609, 609, -272, 272, -609, 272, -609, 317,
-                  -609, 272, -609, 317, -609, 272, -609, 272, -609, 317, -609, 317, -609, 317, -609, 609, -272,
-                  317, -609, 272, -609, 317, -609, 272, -609, 609, -272, 609, -272, 609, -272, 272, -609, 609,
-                  -272, 272, -609, 272, -609, 609, -272, 609, -272, 609, -272, 609
-          ]
-          repeat:
-            times: 12
-            wait_time: 5115us
-
-
-  - platform: template
-    name: "EXP E8 Elia CLOSE snapped, 12 reps (baseline)"
-    icon: mdi:flask
-    on_press:
-      - script.execute:
-          id: aok_tx
-          exp: "E8"
-          note: "BASELINE - identical to what the normal Elia Close button does. Run ~10x and report success count."
-          id_sel: 0
-          channel: 2
-          cmd: 0x43
-          t_us: 301
-          hdr_us: 5115
-          hdr_space_us: 0
-          gap_us: 5115
-          times: 12
-          trailer: 1
-          cks_delta: 0
-
-  - platform: template
-    name: "EXP E9 Elia CLOSE snapped, 30 reps"
-    icon: mdi:flask
-    on_press:
-      - script.execute:
-          id: aok_tx
-          exp: "E9"
-          note: "Same as E8 but 30 repeats. Tests whether failures are marginal RF that more repeats fixes. Run ~10x and report success count."
-          id_sel: 0
-          channel: 2
-          cmd: 0x43
-          t_us: 301
-          hdr_us: 5115
-          hdr_space_us: 0
-          gap_us: 5115
-          times: 30
-          trailer: 1
-          cks_delta: 0
-
-  # E10 pauses BLE scanning around the transmission. bluetooth_proxy and the BLE
-  # tracker are active on this device and compete for radio/CPU time.
-  - platform: template
-    name: "EXP E10 Elia CLOSE with BLE paused"
-    icon: mdi:flask
-    on_press:
-      - esp32_ble_tracker.stop_scan:
-      - delay: 300ms
-      - script.execute:
-          id: aok_tx
-          exp: "E10"
-          note: "Same as E8 but with BLE scanning stopped first. Tests BLE/WiFi interference. Run ~10x and report success count. BLE restarts automatically after."
-          id_sel: 0
-          channel: 2
-          cmd: 0x43
-          t_us: 301
-          hdr_us: 5115
-          hdr_space_us: 0
-          gap_us: 5115
-          times: 12
-          trailer: 1
-          cks_delta: 0
-      - delay: 3s
+          ESP_LOGI("EXP", "  ^ R6: same as R1 but with BLE scanning stopped throughout");
+          ESP_LOGI("EXP", "    PASS = shutter halted early. FAIL = ran to the end.");
       - esp32_ble_tracker.start_scan:
           continuous: true
 
-  # --- Group D: which parts of the frame are actually required? ---
-
   - platform: template
-    name: "EXP E11 Elia CLOSE without trailing mark"
+    name: "EXP R9 STOP via rc_switch proto 6"
     icon: mdi:flask
     on_press:
-      - script.execute:
-          id: aok_tx
-          exp: "E11"
-          note: "Elia CLOSE with the final 2T mark omitted. EXPECT: if it still works, the trailer is decorative. Run ~10x."
-          id_sel: 0
-          channel: 2
-          cmd: 0x43
-          t_us: 301
-          hdr_us: 5115
-          hdr_space_us: 0
-          gap_us: 5115
-          times: 12
-          trailer: 0
-          cks_delta: 0
-
-  # The captures start with two identical ~5000us values, so it was ambiguous
-  # whether the first is an inter-frame gap or part of the header. Variant A
-  # (gap + 5000 mark + 2T space) is what ships. E12 sends variant B instead.
-  - platform: template
-    name: "EXP E12 Elia CLOSE header variant B"
-    icon: mdi:flask
-    on_press:
-      - script.execute:
-          id: aok_tx
-          exp: "E12"
-          note: "Elia CLOSE with a 5115us header SPACE instead of 2T. Tests the header ambiguity directly. Run ~10x."
-          id_sel: 0
-          channel: 2
-          cmd: 0x43
-          t_us: 301
-          hdr_us: 5115
-          hdr_space_us: 5115
-          gap_us: 5115
-          times: 12
-          trailer: 1
-          cks_delta: 0
-
-
-  # --- Group E: is Sublimex really plain Dooya? ---
-  # This uses ESPHome's OWN built-in Dooya encoder with the decoded fields,
-  # not our captured waveform. If Dormitorio opens, the Dooya decode
-  # (id/channel/button) is confirmed and those covers need no stored waveform.
-  - platform: template
-    name: "EXP E13 Dormitorio OPEN via native Dooya"
-    icon: mdi:flask
-    on_press:
+      - script.execute: probe_move
+      - script.wait: probe_move
+      - remote_transmitter.transmit_rc_switch_raw:
+          transmitter_id: rf_transmitter
+          protocol: 6
+          code: "1010001111001000011011100010110000000010000000000010001110000111"
+          repeat:
+            times: 12
+            wait_time: 5000us
+      - delay: 2500ms
       - lambda: |-
-          id(exp_trial)++;
-          ESP_LOGI("EXP", "E13 trial=%d | Dormitorio OPEN using ESPHome's native Dooya encoder", id(exp_trial));
-          ESP_LOGI("EXP", "  id=0xC389EB channel=5 button=1 check=1 (button 1=up/open)");
-          ESP_LOGI("EXP", "  EXPECT: Dormitorio opens. Confirms Sublimex == Dooya and that no captured waveform is needed.");
+          ESP_LOGI("EXP", "  ^ R9: same 64-bit code through rc_switch protocol 6's encoder");
+          ESP_LOGI("EXP", "    proto 6 emits 450/900us where A-OK uses ~300/600us, so this also");
+          ESP_LOGI("EXP", "    probes how much timing error the motor tolerates.");
+          ESP_LOGI("EXP", "    PASS = halted early (nbits=64 alone would have fixed stock firmware).");
+
+  # --- Sublimex / Dooya ---
+  # Round 1's E13 was my bug: transmit_dooya had no `repeat:`, so it sent ONE
+  # frame where the working button sends 8. Fixed here, and now probed with
+  # Dooya's own STOP (button 5) so the result cannot be confounded by position.
+  - platform: template
+    name: "EXP R11 Dormitorio STOP via native Dooya"
+    icon: mdi:flask
+    on_press:
+      - button.press: btn_dormitorio_open
+      - delay: 3500ms
       - remote_transmitter.transmit_dooya:
           transmitter_id: rf_transmitter
           id: 0xC389EB
           channel: 5
-          button: 1
-          check: 1
-
-  # --- Group F: would the original nbits fix have been enough? ---
-  # The stock firmware decoded the A-OK frame CORRECTLY as 64 bits via rc_switch
-  # protocol 6 (its inverted short/long structure matches A-OK's distance
-  # coding); it only failed because playback hardcoded 24 bits. E14 replays the
-  # same code through protocol 6's ENCODER at the full 64 bits. Protocol 6 uses
-  # 450/900us where A-OK uses ~300/600us, so this also probes how much timing
-  # error the motor tolerates.
-  - platform: template
-    name: "EXP E14 Elia CLOSE via rc_switch proto 6, 64 bits"
-    icon: mdi:flask
-    on_press:
-      - lambda: |-
-          id(exp_trial)++;
-          ESP_LOGI("EXP", "E14 trial=%d | Elia CLOSE via rc_switch protocol 6 encoder at 64 bits", id(exp_trial));
-          ESP_LOGI("EXP", "  code=0xA3C86E2C020043A7 nbits=64");
-          ESP_LOGI("EXP", "  proto 6 emits 450/900us bits vs A-OK's ~300/600us - also a timing-tolerance probe.");
-          ESP_LOGI("EXP", "  EXPECT: if Elia closes, storing nbits=64 would have been enough on the stock firmware.");
-      - remote_transmitter.transmit_rc_switch_raw:
-          transmitter_id: rf_transmitter
-          protocol: 6
-          code: "1010001111001000011011100010110000000010000000000100001110100111"
+          button: 5
+          check: 5
           repeat:
-            times: 12
-            wait_time: 5115us
-
-  # --- Group G: automatic self-check (no observation needed) ---
-  # Transmits a known code with the analyser armed, so the device's own receiver
-  # decodes what it just sent. This validates the transmitted waveform end to end
-  # and reports PASS/FAIL in the log by itself. It also tells us whether the
-  # receive path works at all, which decides if learning from the remote is viable.
-  - platform: template
-    name: "EXP E15 Loopback self-test"
-    icon: mdi:sync
-    on_press:
+            times: 8
+            wait_time: 7755us
+      - delay: 2500ms
       - lambda: |-
           id(exp_trial)++;
-          id(rf_analyze_mode) = true;
-          id(exp_expect_code) = 0xA3C86E2C020043A7ULL;
-          ESP_LOGI("EXP", "E15 trial=%d | Loopback: transmitting Elia CLOSE with the analyser armed", id(exp_trial));
-          ESP_LOGI("EXP", "  expecting the receiver to decode 0xA3C86E2C020043A7 back");
-          ESP_LOGI("EXP", "  Look for an RF_ANALYZE LOOPBACK line - it reports PASS/FAIL automatically.");
-      - script.execute:
-          id: aok_tx
-          exp: "E15"
-          note: "loopback transmission"
-          id_sel: 0
-          channel: 2
-          cmd: 0x43
-          t_us: 301
-          hdr_us: 5115
-          hdr_space_us: 0
-          gap_us: 5115
-          times: 12
-          trailer: 1
-          cks_delta: 0
-      - delay: 4s
-      - lambda: |-
-          if (id(exp_expect_code) != 0) {
-            ESP_LOGW("EXP", "E15 RESULT: FAIL - the receiver never decoded a valid A-OK frame from our own transmission.");
-            ESP_LOGW("EXP", "  => the RX path cannot hear this protocol here, so learning from the remote is unlikely to work.");
-          }
-          id(exp_expect_code) = 0;
-          id(rf_analyze_mode) = false;
+          ESP_LOGI("EXP", "R11 trial=%d | Dormitorio moved with the known-good code, then stopped", id(exp_trial));
+          ESP_LOGI("EXP", "  using ESPHome's NATIVE Dooya encoder: id=0xC389EB channel=5 button=5(stop)");
+          ESP_LOGI("EXP", "  PASS = halted early -> Sublimex really is plain Dooya and needs no stored waveform.");
 
   - platform: template
     name: "EXP Reset trial counter"
@@ -1236,7 +1255,8 @@ button:
     on_press:
       - lambda: |-
           id(exp_trial) = 0;
-          ESP_LOGI("EXP", "Trial counter reset to 0");
+          id(probe_dir) = false;
+          ESP_LOGI("EXP", "Trial counter reset");
 
 
 
@@ -1244,18 +1264,37 @@ switch:
   # Turn on, press a button on the physical remote near the device, then read
   # the "RF_ANALYZE" lines in the ESPHome log. Turn off when finished.
   - platform: template
-    name: "RF Analyze"
-    icon: mdi:magnify-scan
+    name: "RF Learn"
+    icon: mdi:school
     optimistic: true
     entity_category: config
     turn_on_action:
       - lambda: |-
           id(rf_analyze_mode) = true;
-          ESP_LOGI("RF_ANALYZE", "Analyze mode ON - press a remote button near the device");
+          ESP_LOGI("RF_LEARN", "Learn mode ON - press a button on any RF remote near the device.");
+          ESP_LOGI("RF_LEARN", "Only frames that fully validate are logged (A-OK by checksum,");
+          ESP_LOGI("RF_LEARN", "Dooya by ESPHome's own decoder), so background noise stays quiet.");
     turn_off_action:
       - lambda: |-
           id(rf_analyze_mode) = false;
-          ESP_LOGI("RF_ANALYZE", "Analyze mode OFF");
+          ESP_LOGI("RF_LEARN", "Learn mode OFF");
+
+  # Verbose waveform dump for deep debugging. Separate from RF Learn and off by
+  # default - this is what flooded the log in round 1. Leave it off unless a
+  # remote refuses to decode and the raw timing is genuinely needed.
+  - platform: template
+    name: "RF Raw Debug"
+    icon: mdi:waveform
+    optimistic: true
+    entity_category: config
+    turn_on_action:
+      - lambda: |-
+          id(rf_raw_debug) = true;
+          ESP_LOGW("RF_RAW", "Raw debug ON - verbose, expect noise. Turn off when done.");
+    turn_off_action:
+      - lambda: |-
+          id(rf_raw_debug) = false;
+          ESP_LOGI("RF_RAW", "Raw debug OFF");
 
 light:
   - platform: status_led
@@ -1373,6 +1412,52 @@ select:
 
 # Script for sending raw IR signals
 script:
+  # Moves Elia with a known-good command so a stop probe has something to halt.
+  # Direction alternates every trial, keeping the shutter mid-travel so it never
+  # parks at a limit where the next command would look like a failure.
+  - id: probe_move
+    mode: single
+    then:
+      - lambda: |-
+          id(probe_dir) = !id(probe_dir);
+          id(exp_trial)++;
+          ESP_LOGI("EXP", "--- trial %d --- moving Elia %s, then sending the experimental STOP",
+                   id(exp_trial), id(probe_dir) ? "OPEN" : "CLOSE");
+      - if:
+          condition:
+            lambda: 'return id(probe_dir);'
+          then:
+            - script.execute:
+                id: aok_tx
+                exp: "  mover"
+                note: "known-good OPEN"
+                id_sel: 0
+                channel: 2
+                cmd: 0x0B
+                t_us: 302
+                hdr_us: 5114
+                hdr_space_us: 0
+                gap_us: 5114
+                times: 12
+                trailer: 1
+                cks_delta: 0
+          else:
+            - script.execute:
+                id: aok_tx
+                exp: "  mover"
+                note: "known-good CLOSE"
+                id_sel: 0
+                channel: 2
+                cmd: 0x43
+                t_us: 301
+                hdr_us: 5115
+                hdr_space_us: 0
+                gap_us: 5115
+                times: 12
+                trailer: 1
+                cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 3000ms
   # Builds an A-OK frame from its fields and transmits it. Everything about the
   # waveform is derived from the parameters, so nothing is replayed from a
   # capture - this is what makes the experiments reproducible and explainable.
