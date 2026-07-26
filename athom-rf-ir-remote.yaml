@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.2.0"
+  project_version: "v3.3.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -439,8 +439,11 @@ remote_receiver:
             for (int i = 0; i < 7; i++) sum += by[i];
             uint8_t calc = (uint8_t) ((sum + 0x5D) & 0xFF);
             if (calc == by[7]) {
+              // 0x24 is emitted 6x right after every UP/DOWN burst, never
+              // after STOP. It satisfies the same checksum rule, so it is a
+              // real command rather than a decode artefact.
               const char *cn = by[6] == 0x0B ? "UP"   : by[6] == 0x43 ? "DOWN" :
-                               by[6] == 0x23 ? "STOP" : "?";
+                               by[6] == 0x23 ? "STOP" : by[6] == 0x24 ? "FOLLOW-UP" : "?";
               ESP_LOGI("RF_LEARN", "A-OK  code=0x%016llX  ID=0x%08X ch=%d cmd=0x%02X(%s)  CHECKSUM OK",
                        (unsigned long long) code,
                        (unsigned) (((uint32_t) by[0] << 24) | ((uint32_t) by[1] << 16) |
@@ -1248,6 +1251,246 @@ button:
           ESP_LOGI("EXP", "R11 trial=%d | Dormitorio moved with the known-good code, then stopped", id(exp_trial));
           ESP_LOGI("EXP", "  using ESPHome's NATIVE Dooya encoder: id=0xC389EB channel=5 button=5(stop)");
           ESP_LOGI("EXP", "  PASS = halted early -> Sublimex really is plain Dooya and needs no stored waveform.");
+
+
+  # --- Round 2b: the follow-up frame -------------------------------------
+  # Captured from the real remote: pressing UP or DOWN emits the direction
+  # command 6 times AND THEN a second command, 0x24, six more times. STOP emits
+  # only its own frame, never 0x24. Our firmware has only ever sent the first
+  # burst, which may be why direction commands are less reliable than STOP.
+  # 0x24 satisfies the same checksum rule, so it is a first-class command and
+  # not a decode artefact. R12/R13/R14 A/B it directly.
+  # These probe direction commands, so they alternate UP/DOWN and halt the
+  # shutter after 2s: it stays mid-travel and the motor stays cool.
+
+  - platform: template
+    name: "EXP R12 Direction, no follow-up (current)"
+    icon: mdi:flask
+    on_press:
+      - lambda: |-
+          id(probe_dir) = !id(probe_dir);
+          id(exp_trial)++;
+          ESP_LOGI("EXP", "--- trial %d --- R12: sending %s", id(exp_trial),
+                   id(probe_dir) ? "UP" : "DOWN");
+      - if:
+          condition:
+            lambda: 'return id(probe_dir);'
+          then:
+            - script.execute:
+                id: aok_tx
+                exp: "R12"
+                note: "direction under test"
+                id_sel: 0
+                channel: 2
+                cmd: 0x0B
+                t_us: 302
+                hdr_us: 5114
+                hdr_space_us: 0
+                gap_us: 5114
+                times: 12
+                trailer: 1
+                cks_delta: 0
+            - script.wait: aok_tx
+          else:
+            - script.execute:
+                id: aok_tx
+                exp: "R12"
+                note: "direction under test"
+                id_sel: 0
+                channel: 2
+                cmd: 0x43
+                t_us: 301
+                hdr_us: 5115
+                hdr_space_us: 0
+                gap_us: 5115
+                times: 12
+                trailer: 1
+                cks_delta: 0
+            - script.wait: aok_tx
+      - delay: 2000ms
+      - script.execute:
+          id: aok_tx
+          exp: "  halt"
+          note: "known-good STOP, keeps travel short"
+          id_sel: 0
+          channel: 2
+          cmd: 0x23
+          t_us: 299
+          hdr_us: 5000
+          hdr_space_us: 0
+          gap_us: 5000
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R12 BASELINE: direction only, 12 reps - what the firmware does today");
+          ESP_LOGI("EXP", "    PASS = shutter started moving. FAIL = never moved.");
+          ESP_LOGI("EXP", "    (halted after 2s on purpose so travel stays short)");
+
+
+  - platform: template
+    name: "EXP R13 Direction + 0x24 follow-up"
+    icon: mdi:flask
+    on_press:
+      - lambda: |-
+          id(probe_dir) = !id(probe_dir);
+          id(exp_trial)++;
+          ESP_LOGI("EXP", "--- trial %d --- R13: sending %s", id(exp_trial),
+                   id(probe_dir) ? "UP" : "DOWN");
+      - if:
+          condition:
+            lambda: 'return id(probe_dir);'
+          then:
+            - script.execute:
+                id: aok_tx
+                exp: "R13"
+                note: "direction under test"
+                id_sel: 0
+                channel: 2
+                cmd: 0x0B
+                t_us: 302
+                hdr_us: 5114
+                hdr_space_us: 0
+                gap_us: 5114
+                times: 12
+                trailer: 1
+                cks_delta: 0
+            - script.wait: aok_tx
+          else:
+            - script.execute:
+                id: aok_tx
+                exp: "R13"
+                note: "direction under test"
+                id_sel: 0
+                channel: 2
+                cmd: 0x43
+                t_us: 301
+                hdr_us: 5115
+                hdr_space_us: 0
+                gap_us: 5115
+                times: 12
+                trailer: 1
+                cks_delta: 0
+            - script.wait: aok_tx
+      - delay: 200ms
+      - script.execute:
+          id: aok_tx
+          exp: "R13/fu"
+          note: "0x24 follow-up"
+          id_sel: 0
+          channel: 2
+          cmd: 0x24
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 2000ms
+      - script.execute:
+          id: aok_tx
+          exp: "  halt"
+          note: "known-good STOP, keeps travel short"
+          id_sel: 0
+          channel: 2
+          cmd: 0x23
+          t_us: 299
+          hdr_us: 5000
+          hdr_space_us: 0
+          gap_us: 5000
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R13: same but followed by the 0x24 frame the real remote sends");
+          ESP_LOGI("EXP", "    PASS = shutter started moving. FAIL = never moved.");
+          ESP_LOGI("EXP", "    (halted after 2s on purpose so travel stays short)");
+
+
+  - platform: template
+    name: "EXP R14 Exact remote emulation (6+6)"
+    icon: mdi:flask
+    on_press:
+      - lambda: |-
+          id(probe_dir) = !id(probe_dir);
+          id(exp_trial)++;
+          ESP_LOGI("EXP", "--- trial %d --- R14: sending %s", id(exp_trial),
+                   id(probe_dir) ? "UP" : "DOWN");
+      - if:
+          condition:
+            lambda: 'return id(probe_dir);'
+          then:
+            - script.execute:
+                id: aok_tx
+                exp: "R14"
+                note: "direction under test"
+                id_sel: 0
+                channel: 2
+                cmd: 0x0B
+                t_us: 302
+                hdr_us: 5114
+                hdr_space_us: 0
+                gap_us: 5114
+                times: 6
+                trailer: 1
+                cks_delta: 0
+            - script.wait: aok_tx
+          else:
+            - script.execute:
+                id: aok_tx
+                exp: "R14"
+                note: "direction under test"
+                id_sel: 0
+                channel: 2
+                cmd: 0x43
+                t_us: 301
+                hdr_us: 5115
+                hdr_space_us: 0
+                gap_us: 5115
+                times: 6
+                trailer: 1
+                cks_delta: 0
+            - script.wait: aok_tx
+      - delay: 200ms
+      - script.execute:
+          id: aok_tx
+          exp: "R14/fu"
+          note: "0x24 follow-up"
+          id_sel: 0
+          channel: 2
+          cmd: 0x24
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 6
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 2000ms
+      - script.execute:
+          id: aok_tx
+          exp: "  halt"
+          note: "known-good STOP, keeps travel short"
+          id_sel: 0
+          channel: 2
+          cmd: 0x23
+          t_us: 299
+          hdr_us: 5000
+          hdr_space_us: 0
+          gap_us: 5000
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ R14: exactly what the remote does - 6 direction frames then 6 x 0x24");
+          ESP_LOGI("EXP", "    PASS = shutter started moving. FAIL = never moved.");
+          ESP_LOGI("EXP", "    (halted after 2s on purpose so travel stays short)");
 
   - platform: template
     name: "EXP Reset trial counter"
