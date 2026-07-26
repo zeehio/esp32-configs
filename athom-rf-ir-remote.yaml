@@ -374,10 +374,19 @@ remote_receiver:
                    (int) n, header_items, (int) body.size(), T, c1, c2, cother, maxres, verdict);
 
           // A-OK field decode. The run structure is a pulse-distance code, same
-          // scheme as Dooya but with T ~= 300us and 64 bits: pairing the runs
-          // from index 1 gives (1T,2T)=0 and (2T,1T)=1, framed by a 2T header
-          // low and a 2T trailing mark (which is why a frame has 64 one-T runs
-          // and 66 two-T runs: one of each per bit, plus the two framing runs).
+          // scheme as Dooya but with T ~= 300us: pairing the runs from index 1
+          // gives (1T,2T)=0 and (2T,1T)=1, after a 2T header low. The true
+          // frame is 65 bits ending in a constant 1 (github.com/akirjavainen/
+          // A-OK); the final 1's short space merges into the radio silence, so
+          // on the wire it reads as 64 bits plus a lone 2T mark - which is why
+          // a frame has 64 one-T runs and 66 two-T runs.
+          //
+          // Layout: [start 0xA3][24-bit remote ID][16-bit address bitfield, one
+          // bit per channel][8-bit cmd][8-bit checksum][1]. Checksum = 8-bit
+          // sum of ID+address+cmd bytes; our "+0x5D over 7 bytes" form is the
+          // same rule because 0xA3 + 0x5D = 0x100 = 0 mod 256. The log labels
+          // below keep the older byte-wise names (ID includes 0xA3, ch/pad are
+          // the two address bytes) - equivalent on the wire, just coarser.
           if (body.size() >= 129) {
             bool paired = true;
             uint64_t code = 0;
@@ -2188,7 +2197,9 @@ script:
       hdr_space_us: int  # 0 => use 2*T (the normal header low)
       gap_us: int
       times: int
-      trailer: int       # 1 => append the final 2T mark
+      trailer: int       # 1 => append the final 2T mark (the constant 65th bit
+                         # '1' of the A-OK frame; its short space merges into
+                         # the radio silence, so only the mark is emitted)
       cks_delta: int     # 0 => correct checksum; non-zero corrupts it on purpose
     then:
       - lambda: |-
