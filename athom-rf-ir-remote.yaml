@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.6.0"
+  project_version: "v3.6.1"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -827,6 +827,12 @@ button:
   # with checksum = (sum of the first 7 bytes + 0x5D) & 0xFF. Confirmed against
   # the real remote - every button it sends is bit-identical to what we build.
   #
+  # The 0x24 burst follows the direction burst back-to-back at the same
+  # cadence, so the silent gap between them is just the ordinary inter-frame
+  # gap. Two captures of the transition reported gap_since_prev of 55ms and
+  # 72ms against frame periods of 72.2ms and 73.0ms - that difference is one
+  # frame period, i.e. the bursts are contiguous, not separated by ~55ms.
+  #
   # T is 302us for every frame. Four consecutive frames measured through this
   # device's own receiver gave 302.1-302.4 (spread 0.3us), so the remote uses a
   # single fixed T; the 296.5-302.3 spread previously taken per-button from the
@@ -861,7 +867,7 @@ button:
           trailer: 1
           cks_delta: 0
       - script.wait: aok_tx
-      - delay: 55ms
+      - delay: 5ms
       - script.execute:
           id: aok_tx
           exp: "tx"
@@ -897,7 +903,7 @@ button:
           trailer: 1
           cks_delta: 0
       - script.wait: aok_tx
-      - delay: 55ms
+      - delay: 5ms
       - script.execute:
           id: aok_tx
           exp: "tx"
@@ -953,7 +959,7 @@ button:
           trailer: 1
           cks_delta: 0
       - script.wait: aok_tx
-      - delay: 55ms
+      - delay: 5ms
       - script.execute:
           id: aok_tx
           exp: "tx"
@@ -989,7 +995,7 @@ button:
           trailer: 1
           cks_delta: 0
       - script.wait: aok_tx
-      - delay: 55ms
+      - delay: 5ms
       - script.execute:
           id: aok_tx
           exp: "tx"
@@ -1469,7 +1475,7 @@ button:
                 trailer: 1
                 cks_delta: 0
             - script.wait: aok_tx
-      - delay: 55ms
+      - delay: 5ms
       - script.execute:
           id: aok_tx
           exp: "R13/fu"
@@ -1551,7 +1557,7 @@ button:
                 trailer: 1
                 cks_delta: 0
             - script.wait: aok_tx
-      - delay: 55ms
+      - delay: 5ms
       - script.execute:
           id: aok_tx
           exp: "R14/fu"
