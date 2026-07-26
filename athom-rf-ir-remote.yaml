@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.6.1"
+  project_version: "v3.7.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -41,6 +41,13 @@ substitutions:
 #########################GPIO######################
 
 esphome:
+  # Three flashes were wasted on builds that all shipped under the same
+  # filename and could not be told apart from the logs. Announcing the version
+  # at boot makes "which firmware is actually running?" answerable.
+  on_boot:
+    priority: -100
+    then:
+      - lambda: 'ESP_LOGW("BUILD", "running ${project_version}");'
   name: "${name}"
   friendly_name: "${friendly_name}"
   comment: "${device_description}"
@@ -1594,6 +1601,70 @@ button:
           ESP_LOGI("EXP", "    PASS = shutter started moving. FAIL = never moved.");
           ESP_LOGI("EXP", "    (halted after 2s on purpose so travel stays short)");
 
+  # --- Round 3: the inter-frame gap ---------------------------------------
+  #
+  # One measurable difference between our transmission and the remote's is left.
+  # The remote repeats a frame every 72.2 ms; we repeat every 69.4 ms. The body
+  # is identical (same T, same 64 bits, 192T = 57.98 ms), so the whole 2.8 ms
+  # sits in the header mark plus the silent inter-frame gap. Ours is
+  # 5114 + 5114 = 10.2 ms; the remote's must therefore total ~13.0 ms.
+  #
+  # The Tuya capture starts with a ~5000 us mark, and the earlier idle=4ms build
+  # reliably split the remote's frames apart on a gap of roughly 8 ms. Both point
+  # the same way: the header mark is ~5.1 ms, and the remote's silent gap is
+  # ~7.9 ms - about 55% longer than ours.
+  #
+  # Why that could matter: a receiver that delimits frames by silence needs
+  # enough of it to reset its bit counter between repeats. If the motor wants
+  # more than ~5 ms and we give it 5.1, some repeats get swallowed - which is
+  # exactly the symptom (mostly works, fails >10% of the time).
+  #
+  # This is a deduction from arithmetic, not a measurement. G1 vs G2 tests it.
+  - platform: template
+    name: "EXP G1 Direction, gap 5114us (baseline)"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: gap_probe
+          exp: "G1"
+          note: "baseline - identical to the v3.6.1 cover buttons"
+          gap_us: 5114
+          times: 6
+          follow: 1
+  - platform: template
+    name: "EXP G2 Direction, gap 7900us (remote period)"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: gap_probe
+          exp: "G2"
+          note: "gap widened so the frame period matches the remote's 72.2ms"
+          gap_us: 7900
+          times: 6
+          follow: 1
+  - platform: template
+    name: "EXP G3 Direction, gap 7900us, no follow-up"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: gap_probe
+          exp: "G3"
+          note: "G2 without the 0x24 burst - does the follow-up matter at all?"
+          gap_us: 7900
+          times: 6
+          follow: 0
+  - platform: template
+    name: "EXP G4 Direction, gap 12000us (over-long)"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: gap_probe
+          exp: "G4"
+          note: "deliberately longer than the remote - is more silence simply better?"
+          gap_us: 12000
+          times: 6
+          follow: 1
+
   - platform: template
     name: "EXP Reset trial counter"
     icon: mdi:counter
@@ -1824,6 +1895,83 @@ script:
                 cks_delta: 0
       - script.wait: aok_tx
       - delay: 3000ms
+  # Direction-command probe used by the G-series experiments, which vary the
+  # inter-frame gap. Structured like R14: alternate the direction each trial so
+  # the shutter oscillates mid-travel and never parks at a limit, let it run for
+  # 2 s, then halt it with a known-good STOP. Travel stays short, so the motor
+  # never reaches its thermal cutout - the confound that ruined Round 1.
+  #
+  # Only gap_us / times / follow differ between G1-G4. Everything else is held
+  # at the v3.6.1 values, so each button varies exactly one thing.
+  - id: gap_probe
+    mode: single
+    parameters:
+      exp: string
+      note: string
+      gap_us: int
+      times: int
+      follow: int        # 1 => append the 0x24 follow-up burst, as the remote does
+    then:
+      - lambda: |-
+          id(probe_dir) = !id(probe_dir);
+          id(exp_trial)++;
+          ESP_LOGI("EXP", "--- trial %d --- %s: %s  gap=%dus frames=%d follow-up=%s",
+                   id(exp_trial), exp.c_str(), id(probe_dir) ? "UP/open" : "DOWN/close",
+                   gap_us, times, follow ? "yes" : "no");
+          ESP_LOGI("EXP", "    %s", note.c_str());
+      - script.execute:
+          id: aok_tx
+          exp: !lambda 'return exp;'
+          note: "direction under test"
+          id_sel: 0
+          channel: 2
+          cmd: !lambda 'return id(probe_dir) ? 0x0B : 0x43;'
+          t_us: 302
+          hdr_us: 5114
+          hdr_space_us: 0
+          gap_us: !lambda 'return gap_us;'
+          times: !lambda 'return times;'
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - if:
+          condition:
+            lambda: 'return follow != 0;'
+          then:
+            - delay: 5ms
+            - script.execute:
+                id: aok_tx
+                exp: !lambda 'return exp + "/fu";'
+                note: "0x24 follow-up"
+                id_sel: 0
+                channel: 2
+                cmd: 0x24
+                t_us: 302
+                hdr_us: 5114
+                hdr_space_us: 0
+                gap_us: !lambda 'return gap_us;'
+                times: !lambda 'return times;'
+                trailer: 1
+                cks_delta: 0
+            - script.wait: aok_tx
+      - delay: 2000ms
+      - script.execute:
+          id: aok_tx
+          exp: "  halt"
+          note: "known-good STOP, keeps travel short"
+          id_sel: 0
+          channel: 2
+          cmd: 0x23
+          t_us: 302
+          hdr_us: 5114
+          hdr_space_us: 0
+          gap_us: 5114
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - lambda: |-
+          ESP_LOGI("EXP", "  ^ PASS = shutter started moving. FAIL = never moved.");
   # Builds an A-OK frame from its fields and transmits it. Everything about the
   # waveform is derived from the parameters, so nothing is replayed from a
   # capture - this is what makes the experiments reproducible and explainable.
