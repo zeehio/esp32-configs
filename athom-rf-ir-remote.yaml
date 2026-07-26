@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.3.0"
+  project_version: "v3.4.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -132,6 +132,29 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # Burst grouping for the learn log. Frames arrive ~60ms apart within a burst
+  # and bursts are hundreds of ms apart, so collapsing them and printing the
+  # gaps is what distinguishes "same button press" from "next button press".
+  - id: b_code
+    type: uint64_t
+    restore_value: no
+    initial_value: '0'
+  - id: b_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: b_first_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: b_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: b_prev_end_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
   # --- experiment plumbing (see the EXP buttons) ---
   - id: exp_buf
     type: std::vector<int32_t>
@@ -439,16 +462,20 @@ remote_receiver:
             for (int i = 0; i < 7; i++) sum += by[i];
             uint8_t calc = (uint8_t) ((sum + 0x5D) & 0xFF);
             if (calc == by[7]) {
-              // 0x24 is emitted 6x right after every UP/DOWN burst, never
-              // after STOP. It satisfies the same checksum rule, so it is a
-              // real command rather than a decode artefact.
-              const char *cn = by[6] == 0x0B ? "UP"   : by[6] == 0x43 ? "DOWN" :
-                               by[6] == 0x23 ? "STOP" : by[6] == 0x24 ? "FOLLOW-UP" : "?";
-              ESP_LOGI("RF_LEARN", "A-OK  code=0x%016llX  ID=0x%08X ch=%d cmd=0x%02X(%s)  CHECKSUM OK",
-                       (unsigned long long) code,
-                       (unsigned) (((uint32_t) by[0] << 24) | ((uint32_t) by[1] << 16) |
-                                   ((uint32_t) by[2] << 8) | by[3]),
-                       (int) by[4], (int) by[6], cn);
+              // Accumulate into a burst rather than printing every frame. The
+              // flush prints the repeat count and, crucially, the millisecond
+              // gap to the previous burst - that gap is what tells you whether
+              // two different commands came from one button press or two.
+              uint32_t now = millis();
+              if (id(b_count) > 0 && code != id(b_code))
+                id(rf_burst_flush).execute();
+              if (id(b_count) == 0) {
+                id(b_code) = code;
+                id(b_first_ms) = now;
+              }
+              id(b_count)++;
+              id(b_last_ms) = now;
+              id(rf_receiver).set_timeout("burst", 1200, []() { id(rf_burst_flush).execute(); });
             } else {
               id(rf_noise_count)++;
             }
@@ -1655,6 +1682,27 @@ select:
 
 # Script for sending raw IR signals
 script:
+  # Prints one line per burst instead of one per frame, with the inter-burst
+  # gap in milliseconds. A gap of a few hundred ms means the bursts belong to
+  # the same button press; a gap of ~1s or more means a separate press.
+  - id: rf_burst_flush
+    mode: single
+    then:
+      - lambda: |-
+          if (id(b_count) == 0)
+            return;
+          uint64_t code = id(b_code);
+          uint8_t by[8];
+          for (int i = 0; i < 8; i++) by[i] = (uint8_t) (code >> (56 - 8 * i));
+          const char *cn = by[6] == 0x0B ? "UP"   : by[6] == 0x43 ? "DOWN" :
+                           by[6] == 0x23 ? "STOP" : by[6] == 0x24 ? "0x24" : "?";
+          uint32_t gap = (id(b_prev_end_ms) == 0) ? 0 : (id(b_first_ms) - id(b_prev_end_ms));
+          ESP_LOGI("RF_LEARN", "A-OK %-5s cmd=0x%02X x%-2d  span=%lums  gap_since_prev=%lums  code=0x%016llX",
+                   cn, (int) by[6], id(b_count),
+                   (unsigned long) (id(b_last_ms) - id(b_first_ms)),
+                   (unsigned long) gap, (unsigned long long) code);
+          id(b_prev_end_ms) = id(b_last_ms);
+          id(b_count) = 0;
   # Moves Elia with a known-good command so a stop probe has something to halt.
   # Direction alternates every trial, keeping the shutter mid-travel so it never
   # parks at a limit where the next command would look like a failure.
