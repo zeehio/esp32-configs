@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.4.0"
+  project_version: "v3.5.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -820,142 +820,200 @@ button:
             wait_time: 7759us
 
 
-  # A-OK AC123-02D elia open, captured at 433.34 MHz - snapped to T=302us grid (frame 58740->59192 us, 131 items)
+
+  # A-OK covers. Synthesised from fields rather than replaying a captured
+  # waveform: the 64-bit frame is [32-bit ID][channel][pad 0x00][cmd][checksum]
+  # with checksum = (sum of the first 7 bytes + 0x5D) & 0xFF. Confirmed against
+  # the real remote - every button it sends is bit-identical to what we build.
+  #
+  # Direction buttons also send the 0x24 follow-up frame. Capturing a press of
+  # UP alone showed the remote emits the direction command 6x and then 0x24 6x,
+  # while STOP sends only its own frame. We had never sent the follow-up, which
+  # is the most likely reason direction commands were less reliable than stop.
+
   - platform: template
     name: "Elia Open"
     icon: mdi:arrow-up-bold-box
     on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5114, -604, 604, -302, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604, 604, -302, 604,
-                  -302, 604, -302, 604, -302, 302, -604, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604,
-                  302, -604, 604, -302, 604, -302, 302, -604, 604, -302, 604, -302, 604, -302, 302, -604, 302,
-                  -604, 302, -604, 604, -302, 302, -604, 604, -302, 604, -302, 302, -604, 302, -604, 302, -604,
-                  302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 604, -302, 302, -604, 302, -604, 302,
-                  -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604,
-                  302, -604, 302, -604, 604, -302, 302, -604, 604, -302, 604, -302, 302, -604, 604, -302, 604,
-                  -302, 302, -604, 604, -302, 604, -302, 604, -302, 604, -302, 604
-          ]
-          repeat:
-            times: 12
-            wait_time: 5114us
+      - script.execute:
+          id: aok_tx
+          exp: "tx"
+          note: "primary command"
+          id_sel: 0
+          channel: 2
+          cmd: 0x0B
+          t_us: 302
+          hdr_us: 5114
+          hdr_space_us: 0
+          gap_us: 5114
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 200ms
+      - script.execute:
+          id: aok_tx
+          exp: "tx"
+          note: "0x24 follow-up, as the remote sends"
+          id_sel: 0
+          channel: 2
+          cmd: 0x24
+          t_us: 302
+          hdr_us: 5114
+          hdr_space_us: 0
+          gap_us: 5114
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
 
-
-  # A-OK AC123-02D elia close, captured at 433.39 MHz - snapped to T=301us grid (frame 58592->58996 us, 131 items)
   - platform: template
     name: "Elia Close"
     icon: mdi:arrow-down-bold-box
     on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5115, -602, 602, -301, 301, -602, 602, -301, 301, -602, 301, -602, 301, -602, 602, -301, 602,
-                  -301, 602, -301, 602, -301, 301, -602, 301, -602, 602, -301, 301, -602, 301, -602, 301, -602,
-                  301, -602, 602, -301, 602, -301, 301, -602, 602, -301, 602, -301, 602, -301, 301, -602, 301,
-                  -602, 301, -602, 602, -301, 301, -602, 602, -301, 602, -301, 301, -602, 301, -602, 301, -602,
-                  301, -602, 301, -602, 301, -602, 301, -602, 301, -602, 602, -301, 301, -602, 301, -602, 301,
-                  -602, 301, -602, 301, -602, 301, -602, 301, -602, 301, -602, 301, -602, 301, -602, 602, -301,
-                  301, -602, 301, -602, 301, -602, 301, -602, 602, -301, 602, -301, 602, -301, 301, -602, 602,
-                  -301, 301, -602, 301, -602, 602, -301, 602, -301, 602, -301, 602
-          ]
-          repeat:
-            times: 12
-            wait_time: 5115us
+      - script.execute:
+          id: aok_tx
+          exp: "tx"
+          note: "primary command"
+          id_sel: 0
+          channel: 2
+          cmd: 0x43
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 200ms
+      - script.execute:
+          id: aok_tx
+          exp: "tx"
+          note: "0x24 follow-up, as the remote sends"
+          id_sel: 0
+          channel: 2
+          cmd: 0x24
+          t_us: 301
+          hdr_us: 5115
+          hdr_space_us: 0
+          gap_us: 5115
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
 
-
-  # A-OK AC123-02D elia stop, captured at 433.26 MHz - snapped to T=299us grid (frame 57968->58604 us, 131 items)
   - platform: template
     name: "Elia Stop"
     icon: mdi:stop-circle
     on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5000, -598, 598, -299, 299, -598, 598, -299, 299, -598, 299, -598, 299, -598, 598, -299, 598,
-                  -299, 598, -299, 598, -299, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598,
-                  299, -598, 598, -299, 299, -598, 598, -299, 299, -598, 598, -299, 598, -299, 299, -598, 598,
-                  -299, 598, -299, 598, -299, 598, -299, 598, -299, 598, -299, 598, -299, 598, -299, 299, -598,
-                  299, -598, 299, -598, 299, -598, 598, -299, 299, -598, 299, -598, 299, -598, 299, -598, 299,
-                  -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598,
-                  598, -299, 299, -598, 299, -598, 299, -598, 598, -299, 598, -299, 299, -598, 598, -299, 299,
-                  -598, 299, -598, 299, -598, 299, -598, 299, -598, 299, -598, 598
-          ]
-          repeat:
-            times: 12
-            wait_time: 5000us
+      - script.execute:
+          id: aok_tx
+          exp: "tx"
+          note: "primary command"
+          id_sel: 0
+          channel: 2
+          cmd: 0x23
+          t_us: 299
+          hdr_us: 5000
+          hdr_space_us: 0
+          gap_us: 5000
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
 
-
-  # A-OK AC123-02D sofia open, captured at 433.35 MHz - snapped to T=302us grid (frame 58750->59192 us, 131 items)
   - platform: template
     name: "Sofia Open"
     icon: mdi:arrow-up-bold-box
     on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5105, -604, 604, -302, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604, 604, -302, 604,
-                  -302, 604, -302, 604, -302, 302, -604, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604,
-                  302, -604, 604, -302, 604, -302, 302, -604, 604, -302, 604, -302, 604, -302, 302, -604, 302,
-                  -604, 302, -604, 604, -302, 302, -604, 604, -302, 604, -302, 302, -604, 302, -604, 302, -604,
-                  302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 604, -302, 302, -604, 302,
-                  -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604,
-                  302, -604, 302, -604, 604, -302, 302, -604, 604, -302, 604, -302, 302, -604, 604, -302, 604,
-                  -302, 302, -604, 604, -302, 604, -302, 604, -302, 302, -604, 604
-          ]
-          repeat:
-            times: 12
-            wait_time: 5105us
+      - script.execute:
+          id: aok_tx
+          exp: "tx"
+          note: "primary command"
+          id_sel: 0
+          channel: 1
+          cmd: 0x0B
+          t_us: 302
+          hdr_us: 5105
+          hdr_space_us: 0
+          gap_us: 5105
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 200ms
+      - script.execute:
+          id: aok_tx
+          exp: "tx"
+          note: "0x24 follow-up, as the remote sends"
+          id_sel: 0
+          channel: 1
+          cmd: 0x24
+          t_us: 302
+          hdr_us: 5105
+          hdr_space_us: 0
+          gap_us: 5105
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
 
-
-  # A-OK AC123-02D sofia close, captured at 433.29 MHz - snapped to T=297us grid (frame 57883->58212 us, 131 items)
   - platform: template
     name: "Sofia Close"
     icon: mdi:arrow-down-bold-box
     on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5254, -594, 594, -297, 297, -594, 594, -297, 297, -594, 297, -594, 297, -594, 594, -297, 594,
-                  -297, 594, -297, 594, -297, 297, -594, 297, -594, 594, -297, 297, -594, 297, -594, 297, -594,
-                  297, -594, 594, -297, 594, -297, 297, -594, 594, -297, 594, -297, 594, -297, 297, -594, 297,
-                  -594, 297, -594, 594, -297, 297, -594, 594, -297, 594, -297, 297, -594, 297, -594, 297, -594,
-                  297, -594, 297, -594, 297, -594, 297, -594, 297, -594, 297, -594, 594, -297, 297, -594, 297,
-                  -594, 297, -594, 297, -594, 297, -594, 297, -594, 297, -594, 297, -594, 297, -594, 594, -297,
-                  297, -594, 297, -594, 297, -594, 297, -594, 594, -297, 594, -297, 594, -297, 297, -594, 594,
-                  -297, 297, -594, 297, -594, 594, -297, 594, -297, 297, -594, 594
-          ]
-          repeat:
-            times: 12
-            wait_time: 5254us
+      - script.execute:
+          id: aok_tx
+          exp: "tx"
+          note: "primary command"
+          id_sel: 0
+          channel: 1
+          cmd: 0x43
+          t_us: 297
+          hdr_us: 5254
+          hdr_space_us: 0
+          gap_us: 5254
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
+      - delay: 200ms
+      - script.execute:
+          id: aok_tx
+          exp: "tx"
+          note: "0x24 follow-up, as the remote sends"
+          id_sel: 0
+          channel: 1
+          cmd: 0x24
+          t_us: 297
+          hdr_us: 5254
+          hdr_space_us: 0
+          gap_us: 5254
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
 
-
-  # A-OK AC123-02D sofia stop, captured at 433.33 MHz - snapped to T=302us grid (frame 58902->59192 us, 131 items)
   - platform: template
     name: "Sofia Stop"
     icon: mdi:stop-circle
     on_press:
-      - remote_transmitter.transmit_raw:
-          transmitter_id: rf_transmitter
-          carrier_frequency: 0Hz
-          code: [
-                  5065, -604, 604, -302, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604, 604, -302, 604,
-                  -302, 604, -302, 604, -302, 302, -604, 302, -604, 604, -302, 302, -604, 302, -604, 302, -604,
-                  302, -604, 604, -302, 604, -302, 302, -604, 604, -302, 604, -302, 604, -302, 302, -604, 302,
-                  -604, 302, -604, 604, -302, 302, -604, 604, -302, 604, -302, 302, -604, 302, -604, 302, -604,
-                  302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 604, -302, 302, -604, 302,
-                  -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604, 302, -604,
-                  604, -302, 302, -604, 302, -604, 302, -604, 604, -302, 604, -302, 604, -302, 302, -604, 302,
-                  -604, 302, -604, 302, -604, 604, -302, 604, -302, 302, -604, 604
-          ]
-          repeat:
-            times: 12
-            wait_time: 5065us
+      - script.execute:
+          id: aok_tx
+          exp: "tx"
+          note: "primary command"
+          id_sel: 0
+          channel: 1
+          cmd: 0x23
+          t_us: 302
+          hdr_us: 5065
+          hdr_space_us: 0
+          gap_us: 5065
+          times: 12
+          trailer: 1
+          cks_delta: 0
+      - script.wait: aok_tx
 
 
   #################### ROUND 2 EXPERIMENTS ####################
