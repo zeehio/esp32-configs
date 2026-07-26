@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.6.1"
+  project_version: "v3.6.1-idle20-diag"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -280,7 +280,13 @@ remote_receiver:
     # log badly enough to truncate real results. All logging below is gated on a
     # frame actually validating, so only real remotes produce output.
     filter: 4us
-    idle: 4ms
+    # DIAGNOSTIC BUILD: 20ms instead of 4ms. The inter-frame gap is ~5-8ms, so
+    # at 4ms the receiver splits every frame and swallows the leading header
+    # mark. At 20ms a whole 6-frame burst arrives as one capture with every
+    # header and gap intact, which is what lets header and gap be measured
+    # separately. Side effect: per-frame decoding does NOT work in this build,
+    # because rc_switch and the A-OK decoder both expect a single frame.
+    idle: 20ms
     tolerance: 50%
     id: rf_receiver
     # Protocol-aware capture analyser, gated behind the "RF Analyze" switch so
@@ -298,6 +304,28 @@ remote_receiver:
       - lambda: |-
           if (!id(rf_raw_debug))
             return;
+          // DIAGNOSTIC: a multi-frame blob. Report only the items longer than
+          // 1500us (headers and inter-frame gaps) plus how many symbols sit
+          // between them. That is enough to read off the frame anatomy without
+          // dumping 800 timings.
+          if (x.size() > 200) {
+            ESP_LOGI("RF_BURST", "=== BURST ANATOMY: %d items ===", (int) x.size());
+            int since = 0;
+            for (size_t i = 0; i < x.size(); i++) {
+              int32_t v = x[i];
+              bool mark = (v > 0);
+              uint32_t a = mark ? (uint32_t) v : (uint32_t) (-v);
+              if (a > 1500) {
+                ESP_LOGI("RF_BURST", "  [%3d] %-5s %6uus   <- %d symbols preceded it",
+                         (int) i, mark ? "MARK" : "SPACE", (unsigned) a, since);
+                since = 0;
+              } else {
+                since++;
+              }
+            }
+            ESP_LOGI("RF_BURST", "  ...and %d symbols after the last long item", since);
+            return;
+          }
           size_t n = x.size();
           if (n < 40) return;                       // ignore short noise bursts
 
