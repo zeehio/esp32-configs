@@ -826,10 +826,14 @@ button:
   # with checksum = (sum of the first 7 bytes + 0x5D) & 0xFF. Confirmed against
   # the real remote - every button it sends is bit-identical to what we build.
   #
-  # Direction buttons also send the 0x24 follow-up frame. Capturing a press of
-  # UP alone showed the remote emits the direction command 6x and then 0x24 6x,
-  # while STOP sends only its own frame. We had never sent the follow-up, which
-  # is the most likely reason direction commands were less reliable than stop.
+  # Direction buttons also send the 0x24 follow-up frame. Three single-button
+  # captures pin this down, each with nothing else pressed:
+  #   UP    -> 0x0B x6 then 0x24 x6
+  #   DOWN  -> 0x43 x6 then 0x24 x6
+  #   STOP  -> 0x23 x6 only, no 0x24
+  # So 0x24 belongs to a direction press and not to stop. We had never sent it,
+  # which is the most likely reason direction commands were less reliable than
+  # stop, and is why only the four direction buttons below append it.
 
   - platform: template
     name: "Elia Open"
