@@ -41,6 +41,15 @@ substitutions:
 #########################GPIO######################
 
 esphome:
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          ESP_LOGW("BUILD", "**********************************************");
+          ESP_LOGW("BUILD", "*** DIAGNOSTIC BUILD: idle=20ms, rx buf 512 ***");
+          ESP_LOGW("BUILD", "*** expect RF_BURST anatomy, NOT per-frame  ***");
+          ESP_LOGW("BUILD", "*** decoding. Revert to v3.6.1 when done.   ***");
+          ESP_LOGW("BUILD", "**********************************************");
   name: "${name}"
   friendly_name: "${friendly_name}"
   comment: "${device_description}"
@@ -287,6 +296,10 @@ remote_receiver:
     # separately. Side effect: per-frame decoding does NOT work in this build,
     # because rc_switch and the A-OK decoder both expect a single frame.
     idle: 20ms
+    # A whole 6-frame burst is ~786 durations (~393 symbols); the default 192
+    # would truncate it mid-burst. This is a software buffer and does NOT touch
+    # the RMT hardware allocation, which is already at the ESP32's 512 limit.
+    receive_symbols: 512
     tolerance: 50%
     id: rf_receiver
     # Protocol-aware capture analyser, gated behind the "RF Analyze" switch so
@@ -308,7 +321,7 @@ remote_receiver:
           // 1500us (headers and inter-frame gaps) plus how many symbols sit
           // between them. That is enough to read off the frame anatomy without
           // dumping 800 timings.
-          if (x.size() > 200) {
+          if (x.size() > 150) {
             ESP_LOGI("RF_BURST", "=== BURST ANATOMY: %d items ===", (int) x.size());
             int since = 0;
             for (size_t i = 0; i < x.size(); i++) {
