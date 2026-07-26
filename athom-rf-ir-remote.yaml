@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.8.0"
+  project_version: "v3.8.1"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -1641,6 +1641,8 @@ button:
           times: 6
           follow: 1
           primer_pulses: 0
+          primer_mark_us: 302
+          primer_space_us: 302
           stages: 1
   - platform: template
     name: "EXP G2 Direction, gap 7900us (remote period)"
@@ -1654,6 +1656,8 @@ button:
           times: 6
           follow: 1
           primer_pulses: 0
+          primer_mark_us: 302
+          primer_space_us: 302
           stages: 1
   - platform: template
     name: "EXP G3 Direction, gap 7900us, no follow-up"
@@ -1667,6 +1671,8 @@ button:
           times: 6
           follow: 0
           primer_pulses: 0
+          primer_mark_us: 302
+          primer_space_us: 302
           stages: 1
   - platform: template
     name: "EXP G4 Direction, gap 12000us (over-long)"
@@ -1680,6 +1686,8 @@ button:
           times: 6
           follow: 1
           primer_pulses: 0
+          primer_mark_us: 302
+          primer_space_us: 302
           stages: 1
 
   # --- Round 4: the receiver's state, not our waveform ---------------------
@@ -1728,6 +1736,8 @@ button:
           times: 6
           follow: 1
           primer_pulses: 0
+          primer_mark_us: 302
+          primer_space_us: 302
           stages: 1
   - platform: template
     name: "EXP H2 Direction, 24ms AGC primer"
@@ -1741,6 +1751,8 @@ button:
           times: 6
           follow: 1
           primer_pulses: 40
+          primer_mark_us: 302
+          primer_space_us: 302
           stages: 1
   - platform: template
     name: "EXP H3 Direction, 121ms AGC primer"
@@ -1754,6 +1766,8 @@ button:
           times: 6
           follow: 1
           primer_pulses: 200
+          primer_mark_us: 302
+          primer_space_us: 302
           stages: 1
   - platform: template
     name: "EXP H4 Direction, sent twice 500ms apart"
@@ -1767,6 +1781,8 @@ button:
           times: 6
           follow: 1
           primer_pulses: 0
+          primer_mark_us: 302
+          primer_space_us: 302
           stages: 2
   - platform: template
     name: "EXP H5 Direction, 20 frames"
@@ -1780,6 +1796,29 @@ button:
           times: 20
           follow: 1
           primer_pulses: 0
+          primer_mark_us: 302
+          primer_space_us: 302
+          stages: 1
+  # The authentic factory preamble. akirjavainen/A-OK documents that some real
+  # A-OK remotes precede the first command with exactly 8 pulses of ~340us HIGH
+  # + ~520us LOW, running straight into the first frame's AGC mark. Most
+  # remotes omit it - it exists for receivers whose AGC needs settling, which
+  # is precisely what the H-series is probing. If any primer works, this is
+  # the one the motor's receiver was designed to accept.
+  - platform: template
+    name: "EXP H6 Direction, factory preamble 8x340+520"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: gap_probe
+          exp: "H6"
+          note: "the documented A-OK preamble: 8 x (340us mark + 520us space)"
+          gap_us: 5114
+          times: 6
+          follow: 1
+          primer_pulses: 8
+          primer_mark_us: 340
+          primer_space_us: 520
           stages: 1
 
   - platform: template
@@ -2070,19 +2109,25 @@ script:
   # lost. A 50%-duty preamble gives the slicer a correct mid-level reference
   # before any real bits arrive. A long *continuous* mark would be worse than
   # nothing here, because the average would settle on the mark itself.
+  # akirjavainen/A-OK documents that some real A-OK remotes precede the FIRST
+  # frame with exactly this: 8 pulses of ~340us HIGH + ~520us LOW. Most remotes
+  # omit it - it exists for receivers whose AGC needs settling, which is
+  # precisely the failure mode the H-series probes. H6 reproduces it verbatim;
+  # H2/H3 use a longer symmetric train in case the time constant is slower.
   - id: agc_primer
     mode: single
     parameters:
       pulses: int
-      t_us: int
+      mark_us: int
+      space_us: int
     then:
       - lambda: |-
           std::vector<int32_t> w;
           w.reserve(2 * pulses);
-          for (int i = 0; i < pulses; i++) { w.push_back(t_us); w.push_back(-t_us); }
+          for (int i = 0; i < pulses; i++) { w.push_back(mark_us); w.push_back(-space_us); }
           id(exp_buf) = w;
-          ESP_LOGI("EXP", "  primer: %d pulses at %dus = %d ms of 50%% duty",
-                   pulses, t_us, (2 * pulses * t_us) / 1000);
+          ESP_LOGI("EXP", "  primer: %d x (%dus mark + %dus space) = %d ms",
+                   pulses, mark_us, space_us, (pulses * (mark_us + space_us)) / 1000);
       - remote_transmitter.transmit_raw:
           transmitter_id: rf_transmitter
           carrier_frequency: 0Hz
@@ -2104,6 +2149,8 @@ script:
       times: int
       follow: int        # 1 => append the 0x24 follow-up burst, as the remote does
       primer_pulses: int # >0 => precede everything with an AGC primer (H-series)
+      primer_mark_us: int
+      primer_space_us: int
       stages: int        # 2 => send the whole thing twice, 500ms apart (H4)
     then:
       - lambda: |-
@@ -2120,9 +2167,11 @@ script:
             - script.execute:
                 id: agc_primer
                 pulses: !lambda 'return primer_pulses;'
-                t_us: 302
+                mark_us: !lambda 'return primer_mark_us;'
+                space_us: !lambda 'return primer_space_us;'
+            # No delay here on purpose: the documented remote behaviour runs the
+            # preamble straight into the first frame's AGC mark.
             - script.wait: agc_primer
-            - delay: 5ms
       - repeat:
           count: !lambda 'return stages;'
           then:
