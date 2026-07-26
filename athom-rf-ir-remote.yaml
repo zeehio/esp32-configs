@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.7.0"
+  project_version: "v3.8.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -1631,6 +1631,8 @@ button:
           gap_us: 5114
           times: 6
           follow: 1
+          primer_pulses: 0
+          stages: 1
   - platform: template
     name: "EXP G2 Direction, gap 7900us (remote period)"
     icon: mdi:flask
@@ -1642,6 +1644,8 @@ button:
           gap_us: 7900
           times: 6
           follow: 1
+          primer_pulses: 0
+          stages: 1
   - platform: template
     name: "EXP G3 Direction, gap 7900us, no follow-up"
     icon: mdi:flask
@@ -1653,6 +1657,8 @@ button:
           gap_us: 7900
           times: 6
           follow: 0
+          primer_pulses: 0
+          stages: 1
   - platform: template
     name: "EXP G4 Direction, gap 12000us (over-long)"
     icon: mdi:flask
@@ -1664,6 +1670,108 @@ button:
           gap_us: 12000
           times: 6
           follow: 1
+          primer_pulses: 0
+          stages: 1
+
+  # --- Round 4: the receiver's state, not our waveform ---------------------
+  #
+  # G1 == G2 means the inter-frame gap is not the problem, and with it the whole
+  # "our waveform is subtly wrong" theory: T, bit count, checksum, header,
+  # trailer, repeat count and gap have now all been tested, and none of them
+  # separates a working transmission from a failing one.
+  #
+  # The decisive observation is different in kind: it works, then after a while
+  # *nothing* works, and pressing the physical remote once makes it work again.
+  # No property of our frames can explain that - the frames are byte-identical
+  # from one minute to the next. Something in the motor's receiver changes state,
+  # and a strong on-frequency signal resets it.
+  #
+  # A rolling code is ruled out: E1 moved a shutter with a code synthesised from
+  # fields and never transmitted by any remote, and the checksum is a static
+  # function of the frame with no counter anywhere in the 64 bits.
+  #
+  # That leaves the analogue front end. Cheap OOK receivers slice the envelope
+  # against a running average; with no signal the AGC winds up to full gain and
+  # that average sits in the noise. We are ~600 kHz off the remote's carrier, so
+  # we arrive attenuated by the motor's filter - possibly too weak to pull the
+  # AGC down ourselves, while the remote does it easily and leaves it settled for
+  # a while afterwards.
+  #
+  # H1-H5 test that. H2/H3 prepend a 50%-duty primer to give the slicer a
+  # mid-level reference before any real bits arrive; H4 sends everything twice on
+  # the theory that the first burst primes and the second is decoded; H5 just
+  # sends more frames.
+  #
+  # IMPORTANT: alternate H1 with whichever variant you are testing, one trial
+  # each, rather than ten of one then ten of the other. The receiver's state
+  # drifts over minutes, so consecutive blocks are not comparable - that is
+  # almost certainly what made E2 and E8 report 60% and 0/10 from byte-identical
+  # parameters in Round 1.
+  - platform: template
+    name: "EXP H1 Direction, no primer (baseline)"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: gap_probe
+          exp: "H1"
+          note: "baseline - same as G1, for interleaving against H2-H5"
+          gap_us: 5114
+          times: 6
+          follow: 1
+          primer_pulses: 0
+          stages: 1
+  - platform: template
+    name: "EXP H2 Direction, 24ms AGC primer"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: gap_probe
+          exp: "H2"
+          note: "40 primer pulses (24ms) before the frames"
+          gap_us: 5114
+          times: 6
+          follow: 1
+          primer_pulses: 40
+          stages: 1
+  - platform: template
+    name: "EXP H3 Direction, 121ms AGC primer"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: gap_probe
+          exp: "H3"
+          note: "200 primer pulses (121ms) - for a slow AGC time constant"
+          gap_us: 5114
+          times: 6
+          follow: 1
+          primer_pulses: 200
+          stages: 1
+  - platform: template
+    name: "EXP H4 Direction, sent twice 500ms apart"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: gap_probe
+          exp: "H4"
+          note: "whole burst twice - first primes the receiver, second is decoded"
+          gap_us: 5114
+          times: 6
+          follow: 1
+          primer_pulses: 0
+          stages: 2
+  - platform: template
+    name: "EXP H5 Direction, 20 frames"
+    icon: mdi:flask
+    on_press:
+      - script.execute:
+          id: gap_probe
+          exp: "H5"
+          note: "20 frames instead of 6 - does the burst settle the AGC itself?"
+          gap_us: 5114
+          times: 20
+          follow: 1
+          primer_pulses: 0
+          stages: 1
 
   - platform: template
     name: "EXP Reset trial counter"
@@ -1677,6 +1785,29 @@ button:
 
 
 switch:
+  # If the AGC theory holds, the practical fix is not a better waveform but
+  # keeping the motor's receiver awake. This sends one A-OK frame every 30 s
+  # with a deliberately wrong checksum: E3 established the motor ignores a bad
+  # checksum and never acts on it, so it exercises the analogue front end
+  # without ever commanding anything.
+  #
+  # Duty cycle is one ~70 ms frame per 30 s = 0.23%, well inside the 433 MHz
+  # ISM limits. Still off by default - it is a workaround for a hardware
+  # mismatch, and it only earns its place if H2-H5 show the receiver's state is
+  # really what is failing.
+  - platform: template
+    name: "RF Keep-alive (experimental)"
+    icon: mdi:heart-pulse
+    optimistic: true
+    entity_category: config
+    turn_on_action:
+      - lambda: |-
+          ESP_LOGI("EXP", "Keep-alive ON - one invalid-checksum frame every 30s to keep");
+          ESP_LOGI("EXP", "the motor's receiver AGC settled. Harmless: bad checksum, no action.");
+      - script.execute: keepalive_loop
+    turn_off_action:
+      - script.stop: keepalive_loop
+      - lambda: 'ESP_LOGI("EXP", "Keep-alive OFF");'
   # Turn on, press a button on the physical remote near the device, then read
   # the "RF_ANALYZE" lines in the ESPHome log. Turn off when finished.
   - platform: template
@@ -1895,6 +2026,58 @@ script:
                 cks_delta: 0
       - script.wait: aok_tx
       - delay: 3000ms
+  # Driven by the "RF Keep-alive" switch. cks_delta:1 corrupts the checksum on
+  # purpose, so the motor's decoder discards the frame (E3) while its front end
+  # still sees a real signal.
+  - id: keepalive_loop
+    mode: restart
+    then:
+      - while:
+          condition:
+            lambda: 'return true;'
+          then:
+            - script.execute:
+                id: aok_tx
+                exp: "keepalive"
+                note: "invalid checksum on purpose - never acted on"
+                id_sel: 0
+                channel: 2
+                cmd: 0x23
+                t_us: 302
+                hdr_us: 5114
+                hdr_space_us: 0
+                gap_us: 5114
+                times: 1
+                trailer: 1
+                cks_delta: 1
+            - script.wait: aok_tx
+            - delay: 30s
+  # Transmits a train of equal mark/space pulses - no data, just a 50%-duty
+  # square wave. This is an AGC/slicer primer.
+  #
+  # Cheap OOK receivers slice the demodulated envelope against a running
+  # average. With no signal the AGC winds up to full gain and that average sits
+  # in the noise; a frame arriving then can be sliced at the wrong threshold and
+  # lost. A 50%-duty preamble gives the slicer a correct mid-level reference
+  # before any real bits arrive. A long *continuous* mark would be worse than
+  # nothing here, because the average would settle on the mark itself.
+  - id: agc_primer
+    mode: single
+    parameters:
+      pulses: int
+      t_us: int
+    then:
+      - lambda: |-
+          std::vector<int32_t> w;
+          w.reserve(2 * pulses);
+          for (int i = 0; i < pulses; i++) { w.push_back(t_us); w.push_back(-t_us); }
+          id(exp_buf) = w;
+          ESP_LOGI("EXP", "  primer: %d pulses at %dus = %d ms of 50%% duty",
+                   pulses, t_us, (2 * pulses * t_us) / 1000);
+      - remote_transmitter.transmit_raw:
+          transmitter_id: rf_transmitter
+          carrier_frequency: 0Hz
+          code: !lambda 'return id(exp_buf);'
   # Direction-command probe used by the G-series experiments, which vary the
   # inter-frame gap. Structured like R14: alternate the direction each trial so
   # the shutter oscillates mid-travel and never parks at a limit, let it run for
@@ -1911,41 +2094,36 @@ script:
       gap_us: int
       times: int
       follow: int        # 1 => append the 0x24 follow-up burst, as the remote does
+      primer_pulses: int # >0 => precede everything with an AGC primer (H-series)
+      stages: int        # 2 => send the whole thing twice, 500ms apart (H4)
     then:
       - lambda: |-
           id(probe_dir) = !id(probe_dir);
           id(exp_trial)++;
-          ESP_LOGI("EXP", "--- trial %d --- %s: %s  gap=%dus frames=%d follow-up=%s",
+          ESP_LOGI("EXP", "--- trial %d --- %s: %s  gap=%dus frames=%d follow-up=%s primer=%d stages=%d",
                    id(exp_trial), exp.c_str(), id(probe_dir) ? "UP/open" : "DOWN/close",
-                   gap_us, times, follow ? "yes" : "no");
+                   gap_us, times, follow ? "yes" : "no", primer_pulses, stages);
           ESP_LOGI("EXP", "    %s", note.c_str());
-      - script.execute:
-          id: aok_tx
-          exp: !lambda 'return exp;'
-          note: "direction under test"
-          id_sel: 0
-          channel: 2
-          cmd: !lambda 'return id(probe_dir) ? 0x0B : 0x43;'
-          t_us: 302
-          hdr_us: 5114
-          hdr_space_us: 0
-          gap_us: !lambda 'return gap_us;'
-          times: !lambda 'return times;'
-          trailer: 1
-          cks_delta: 0
-      - script.wait: aok_tx
       - if:
           condition:
-            lambda: 'return follow != 0;'
+            lambda: 'return primer_pulses > 0;'
           then:
+            - script.execute:
+                id: agc_primer
+                pulses: !lambda 'return primer_pulses;'
+                t_us: 302
+            - script.wait: agc_primer
             - delay: 5ms
+      - repeat:
+          count: !lambda 'return stages;'
+          then:
             - script.execute:
                 id: aok_tx
-                exp: !lambda 'return exp + "/fu";'
-                note: "0x24 follow-up"
+                exp: !lambda 'return exp;'
+                note: "direction under test"
                 id_sel: 0
                 channel: 2
-                cmd: 0x24
+                cmd: !lambda 'return id(probe_dir) ? 0x0B : 0x43;'
                 t_us: 302
                 hdr_us: 5114
                 hdr_space_us: 0
@@ -1954,6 +2132,28 @@ script:
                 trailer: 1
                 cks_delta: 0
             - script.wait: aok_tx
+            - if:
+                condition:
+                  lambda: 'return follow != 0;'
+                then:
+                  - delay: 5ms
+                  - script.execute:
+                      id: aok_tx
+                      exp: !lambda 'return exp + "/fu";'
+                      note: "0x24 follow-up"
+                      id_sel: 0
+                      channel: 2
+                      cmd: 0x24
+                      t_us: 302
+                      hdr_us: 5114
+                      hdr_space_us: 0
+                      gap_us: !lambda 'return gap_us;'
+                      times: !lambda 'return times;'
+                      trailer: 1
+                      cks_delta: 0
+                  - script.wait: aok_tx
+            # Zero when stages==1, so the single-stage baseline is unaffected.
+            - delay: !lambda 'return stages > 1 ? 500 : 0;'
       - delay: 2000ms
       - script.execute:
           id: aok_tx
