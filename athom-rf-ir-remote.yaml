@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.5.0"
+  project_version: "v3.6.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -392,7 +392,8 @@ remote_receiver:
                              ((uint32_t) by[2] << 8) | by[3];
               const char *cmdname = by[6] == 0x0B ? "UP/open" :
                                     by[6] == 0x43 ? "DOWN/close" :
-                                    by[6] == 0x23 ? "STOP" : "unknown";
+                                    by[6] == 0x23 ? "STOP" :
+                                    by[6] == 0x24 ? "FOLLOW-UP" : "unknown";
               ESP_LOGI("RF_ANALYZE", "  A-OK: code=0x%016llX ID=0x%08X ch=%d pad=0x%02X cmd=0x%02X (%s) cksum=0x%02X calc=0x%02X -> %s",
                        (unsigned long long) code, (unsigned) dev, (int) by[4], (int) by[5],
                        (int) by[6], cmdname, (int) by[7], (int) calc,
@@ -826,6 +827,12 @@ button:
   # with checksum = (sum of the first 7 bytes + 0x5D) & 0xFF. Confirmed against
   # the real remote - every button it sends is bit-identical to what we build.
   #
+  # T is 302us for every frame. Four consecutive frames measured through this
+  # device's own receiver gave 302.1-302.4 (spread 0.3us), so the remote uses a
+  # single fixed T; the 296.5-302.3 spread previously taken per-button from the
+  # Tuya export was that receiver's measurement error. Measuring on the same
+  # clock we transmit with is what makes 302 the right number to send.
+  #
   # Direction buttons also send the 0x24 follow-up frame. Three single-button
   # captures pin this down, each with nothing else pressed:
   #   UP    -> 0x0B x6 then 0x24 x6
@@ -854,7 +861,7 @@ button:
           trailer: 1
           cks_delta: 0
       - script.wait: aok_tx
-      - delay: 200ms
+      - delay: 55ms
       - script.execute:
           id: aok_tx
           exp: "tx"
@@ -882,7 +889,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x43
-          t_us: 301
+          t_us: 302
           hdr_us: 5115
           hdr_space_us: 0
           gap_us: 5115
@@ -890,7 +897,7 @@ button:
           trailer: 1
           cks_delta: 0
       - script.wait: aok_tx
-      - delay: 200ms
+      - delay: 55ms
       - script.execute:
           id: aok_tx
           exp: "tx"
@@ -898,7 +905,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x24
-          t_us: 301
+          t_us: 302
           hdr_us: 5115
           hdr_space_us: 0
           gap_us: 5115
@@ -918,7 +925,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 0
           gap_us: 5000
@@ -946,7 +953,7 @@ button:
           trailer: 1
           cks_delta: 0
       - script.wait: aok_tx
-      - delay: 200ms
+      - delay: 55ms
       - script.execute:
           id: aok_tx
           exp: "tx"
@@ -974,7 +981,7 @@ button:
           id_sel: 0
           channel: 1
           cmd: 0x43
-          t_us: 297
+          t_us: 302
           hdr_us: 5254
           hdr_space_us: 0
           gap_us: 5254
@@ -982,7 +989,7 @@ button:
           trailer: 1
           cks_delta: 0
       - script.wait: aok_tx
-      - delay: 200ms
+      - delay: 55ms
       - script.execute:
           id: aok_tx
           exp: "tx"
@@ -990,7 +997,7 @@ button:
           id_sel: 0
           channel: 1
           cmd: 0x24
-          t_us: 297
+          t_us: 302
           hdr_us: 5254
           hdr_space_us: 0
           gap_us: 5254
@@ -1052,7 +1059,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 0
           gap_us: 5000
@@ -1138,7 +1145,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 0
           gap_us: 5000
@@ -1166,7 +1173,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 0
           gap_us: 5000
@@ -1194,7 +1201,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 0
           gap_us: 5000
@@ -1222,7 +1229,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 5000
           gap_us: 5000
@@ -1250,7 +1257,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 0
           gap_us: 5000
@@ -1280,7 +1287,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 0
           gap_us: 5000
@@ -1388,7 +1395,7 @@ button:
                 id_sel: 0
                 channel: 2
                 cmd: 0x43
-                t_us: 301
+                t_us: 302
                 hdr_us: 5115
                 hdr_space_us: 0
                 gap_us: 5115
@@ -1404,7 +1411,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 0
           gap_us: 5000
@@ -1454,7 +1461,7 @@ button:
                 id_sel: 0
                 channel: 2
                 cmd: 0x43
-                t_us: 301
+                t_us: 302
                 hdr_us: 5115
                 hdr_space_us: 0
                 gap_us: 5115
@@ -1462,7 +1469,7 @@ button:
                 trailer: 1
                 cks_delta: 0
             - script.wait: aok_tx
-      - delay: 200ms
+      - delay: 55ms
       - script.execute:
           id: aok_tx
           exp: "R13/fu"
@@ -1470,7 +1477,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x24
-          t_us: 301
+          t_us: 302
           hdr_us: 5115
           hdr_space_us: 0
           gap_us: 5115
@@ -1486,7 +1493,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 0
           gap_us: 5000
@@ -1536,7 +1543,7 @@ button:
                 id_sel: 0
                 channel: 2
                 cmd: 0x43
-                t_us: 301
+                t_us: 302
                 hdr_us: 5115
                 hdr_space_us: 0
                 gap_us: 5115
@@ -1544,7 +1551,7 @@ button:
                 trailer: 1
                 cks_delta: 0
             - script.wait: aok_tx
-      - delay: 200ms
+      - delay: 55ms
       - script.execute:
           id: aok_tx
           exp: "R14/fu"
@@ -1552,7 +1559,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x24
-          t_us: 301
+          t_us: 302
           hdr_us: 5115
           hdr_space_us: 0
           gap_us: 5115
@@ -1568,7 +1575,7 @@ button:
           id_sel: 0
           channel: 2
           cmd: 0x23
-          t_us: 299
+          t_us: 302
           hdr_us: 5000
           hdr_space_us: 0
           gap_us: 5000
@@ -1802,7 +1809,7 @@ script:
                 id_sel: 0
                 channel: 2
                 cmd: 0x43
-                t_us: 301
+                t_us: 302
                 hdr_us: 5115
                 hdr_space_us: 0
                 gap_us: 5115
