@@ -362,10 +362,23 @@ remote_receiver:
     idle: 65500us
     clock_resolution: "500000"
     id: ir_receiver
+    # AC/climate remotes send frames of several hundred timing items (Daikin
+    # and friends exceed 500), far beyond the 192-symbol default software
+    # buffer, so those captures were truncated or dropped and learning missed
+    # them. This is a software ring buffer - it does not touch the RMT
+    # hardware symbol allocation, which is already at the ESP32's limit across
+    # the four remote channels.
+    receive_symbols: 1024
     on_raw:
       - lambda: |-
           if (id(is_learning_mode)) {
             if (x.size() > id(filter_size)) {
+              // NVS blobs top out near 4000 bytes; int items are 4 bytes each.
+              if (x.size() > 950) {
+                ESP_LOGW("IR_LEARNING", "Captured %d items - too large to store, not saved", x.size());
+                id(status_text).publish_state("Signal too long to store");
+                return;
+              }
               id(signal_nvs).save_to_nvs(id(signal_select_index), x);
               ESP_LOGI("IR_LEARNING", "Signal saved to slot %d, size: %d", id(signal_select_index), x.size());
               id(is_learning_mode) = false;
