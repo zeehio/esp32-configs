@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.4.0"
+  project_version: "v3.4.1"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -45,6 +45,7 @@ esphome:
   on_boot:
     priority: -100
     then:
+      - lambda: 'ESP_LOGW("BUILD", "running ${project_version}");'
       - script.execute: rebuild_cover_cache
   name: "${name}"
   friendly_name: "${friendly_name}"
@@ -1048,9 +1049,13 @@ script:
               id(cover_code_type)[idx] = d[0];
               id(cover_code_val)[idx] = ((uint64_t) (uint32_t) d[1] << 32) | (uint32_t) d[2];
               assigned++;
+              static const char *ANAMES[3] = {"OPEN", "CLOSE", "STOP"};
+              ESP_LOGI("RF_COVER", "  cover %d %-5s = slot %d  type=%d code=0x%016llX",
+                       c + 1, ANAMES[a], m[a], d[0],
+                       (unsigned long long) id(cover_code_val)[idx]);
             }
           }
-          ESP_LOGI("RF_COVER", "Cover code cache rebuilt: %d actions assigned", assigned);
+          ESP_LOGI("RF_COVER", "Cover code cache rebuilt: %d of 12 actions assigned", assigned);
 
   # A frame from a physical remote arrived (rx_type/rx_code). If it matches a
   # code assigned to a cover, drive that cover's time-based state machine so
@@ -1067,8 +1072,19 @@ script:
                 id(cover_code_type)[i] == id(rx_type) &&
                 id(cover_code_val)[i] == id(rx_code)) { match = i; break; }
           }
-          if (match < 0)
+          if (match < 0) {
+            // A checksum-valid A-OK or fully-decoded Dooya frame is a real
+            // remote press, worth surfacing even unmatched; rc_switch decodes
+            // include ambient noise, so those stay at debug level.
+            if (id(rx_type) < 0) {
+              ESP_LOGI("RF_COVER", "Remote frame type=%d code=0x%016llX matches no cover assignment",
+                       id(rx_type), (unsigned long long) id(rx_code));
+            } else {
+              ESP_LOGD("RF_COVER", "rc_switch frame proto=%d code=0x%016llX matches no cover assignment",
+                       id(rx_type), (unsigned long long) id(rx_code));
+            }
             return;
+          }
           // One press decodes as a burst of identical frames: refresh the
           // debounce on every frame, act only on the first.
           uint32_t now = millis();
