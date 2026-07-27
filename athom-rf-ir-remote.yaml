@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.2.0"
+  project_version: "v3.3.1"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -110,6 +110,16 @@ globals:
     type: std::vector<int32_t>
     restore_value: no
     initial_value: 'std::vector<int32_t>()'
+  # Which RF Cover (0-3) the assignment buttons act on
+  - id: cover_select_index
+    type: int
+    restore_value: yes
+    initial_value: '0'
+  # Slot resolved by cover_cmd for the current action; -1 when unassigned
+  - id: cover_tmp_slot
+    type: int
+    restore_value: no
+    initial_value: '-1'
 
 # Flash storage component for saving IR signals
 Flash_comp:
@@ -536,7 +546,9 @@ button:
     name: "RF Send"
     icon: mdi:send
     on_press:
-      - script.execute: send_raw_rf_signal
+      - script.execute:
+          id: send_raw_rf_signal
+          slot: !lambda 'return id(rf_signal_select_index);'
 
   # Clear the RF signal in the current slot
   - platform: template
@@ -548,6 +560,49 @@ button:
           id(signal_nvs).save_to_nvs(id(rf_signal_select_index), empty_signal);
           ESP_LOGI("RF_LEARNING", "Cleared slot %d", id(rf_signal_select_index));
           id(rf_status_text).publish_state("Slot cleared");
+
+  # Cover assignment: pick the cover in "RF Cover Config", select a learned
+  # slot in "RF Signal Slot", then press one of these to wire that slot to the
+  # cover's action. The mapping is stored in NVS and survives reboots.
+  - platform: template
+    name: "Cover assign slot as OPEN"
+    icon: mdi:arrow-up-bold-box
+    entity_category: config
+    on_press:
+      - lambda: |-
+          int c = id(cover_select_index);
+          std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
+          if (m.size() < 3) m = {-1, -1, -1};
+          m[0] = id(rf_signal_select_index);
+          id(signal_nvs).save_to_nvs(200 + c, m);
+          ESP_LOGI("RF_COVER", "Cover %d OPEN = slot %d", c + 1, m[0]);
+          id(rf_status_text).publish_state("Cover OPEN assigned");
+  - platform: template
+    name: "Cover assign slot as CLOSE"
+    icon: mdi:arrow-down-bold-box
+    entity_category: config
+    on_press:
+      - lambda: |-
+          int c = id(cover_select_index);
+          std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
+          if (m.size() < 3) m = {-1, -1, -1};
+          m[1] = id(rf_signal_select_index);
+          id(signal_nvs).save_to_nvs(200 + c, m);
+          ESP_LOGI("RF_COVER", "Cover %d CLOSE = slot %d", c + 1, m[1]);
+          id(rf_status_text).publish_state("Cover CLOSE assigned");
+  - platform: template
+    name: "Cover assign slot as STOP"
+    icon: mdi:stop-circle-outline
+    entity_category: config
+    on_press:
+      - lambda: |-
+          int c = id(cover_select_index);
+          std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
+          if (m.size() < 3) m = {-1, -1, -1};
+          m[2] = id(rf_signal_select_index);
+          id(signal_nvs).save_to_nvs(200 + c, m);
+          ESP_LOGI("RF_COVER", "Cover %d STOP = slot %d", c + 1, m[2]);
+          id(rf_status_text).publish_state("Cover STOP assigned");
 
 light:
   - platform: status_led
@@ -663,6 +718,198 @@ select:
           else if (x == "Signal 15") id(rf_signal_select_index) = 25;
           ESP_LOGI("RF_LEARNING", "Selected slot: %d", id(rf_signal_select_index));
 
+  # Which RF Cover the three "Cover: assign" buttons act on
+  - platform: template
+    name: "RF Cover Config"
+    id: rf_cover_select
+    optimistic: true
+    entity_category: config
+    options:
+      - "Cover 1"
+      - "Cover 2"
+      - "Cover 3"
+      - "Cover 4"
+    initial_option: "Cover 1"
+    on_value:
+      - lambda: |-
+          id(cover_select_index) = (int) i;
+          ESP_LOGI("RF_COVER", "Configuring cover %d", (int) i + 1);
+
+# Covers built from learned slots: assign any slot as a cover's OPEN, CLOSE or
+# STOP with the config buttons, then the cover appears in Home Assistant as a
+# normal shutter with a position slider. Position is estimated from travel
+# time (set per cover below); there is no position feedback over RF. The
+# motors stop themselves at their limits, hence has_built_in_endstop.
+cover:
+  - platform: time_based
+    name: "RF Cover 1"
+    id: rf_cover_1
+    device_class: shutter
+    has_built_in_endstop: true
+    open_duration: 30s
+    close_duration: 30s
+    open_action:
+      - script.execute: { id: cover_cmd, cover: 0, cmd: 0 }
+    close_action:
+      - script.execute: { id: cover_cmd, cover: 0, cmd: 1 }
+    stop_action:
+      - script.execute: { id: cover_cmd, cover: 0, cmd: 2 }
+  - platform: time_based
+    name: "RF Cover 2"
+    id: rf_cover_2
+    device_class: shutter
+    has_built_in_endstop: true
+    open_duration: 30s
+    close_duration: 30s
+    open_action:
+      - script.execute: { id: cover_cmd, cover: 1, cmd: 0 }
+    close_action:
+      - script.execute: { id: cover_cmd, cover: 1, cmd: 1 }
+    stop_action:
+      - script.execute: { id: cover_cmd, cover: 1, cmd: 2 }
+  - platform: time_based
+    name: "RF Cover 3"
+    id: rf_cover_3
+    device_class: shutter
+    has_built_in_endstop: true
+    open_duration: 30s
+    close_duration: 30s
+    open_action:
+      - script.execute: { id: cover_cmd, cover: 2, cmd: 0 }
+    close_action:
+      - script.execute: { id: cover_cmd, cover: 2, cmd: 1 }
+    stop_action:
+      - script.execute: { id: cover_cmd, cover: 2, cmd: 2 }
+  - platform: time_based
+    name: "RF Cover 4"
+    id: rf_cover_4
+    device_class: shutter
+    has_built_in_endstop: true
+    open_duration: 30s
+    close_duration: 30s
+    open_action:
+      - script.execute: { id: cover_cmd, cover: 3, cmd: 0 }
+    close_action:
+      - script.execute: { id: cover_cmd, cover: 3, cmd: 1 }
+    stop_action:
+      - script.execute: { id: cover_cmd, cover: 3, cmd: 2 }
+
+# Travel times for the time-based position estimate. Restored on boot; the
+# on_value applies them to the running cover, so no reflash is needed to tune.
+number:
+  - platform: template
+    name: "RF Cover 1 Open Duration"
+    id: rf_cover_1_open_s
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    min_value: 1
+    max_value: 120
+    step: 0.5
+    unit_of_measurement: "s"
+    mode: box
+    on_value:
+      - lambda: 'id(rf_cover_1).set_open_duration((uint32_t) (x * 1000.0f));'
+  - platform: template
+    name: "RF Cover 1 Close Duration"
+    id: rf_cover_1_close_s
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    min_value: 1
+    max_value: 120
+    step: 0.5
+    unit_of_measurement: "s"
+    mode: box
+    on_value:
+      - lambda: 'id(rf_cover_1).set_close_duration((uint32_t) (x * 1000.0f));'
+  - platform: template
+    name: "RF Cover 2 Open Duration"
+    id: rf_cover_2_open_s
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    min_value: 1
+    max_value: 120
+    step: 0.5
+    unit_of_measurement: "s"
+    mode: box
+    on_value:
+      - lambda: 'id(rf_cover_2).set_open_duration((uint32_t) (x * 1000.0f));'
+  - platform: template
+    name: "RF Cover 2 Close Duration"
+    id: rf_cover_2_close_s
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    min_value: 1
+    max_value: 120
+    step: 0.5
+    unit_of_measurement: "s"
+    mode: box
+    on_value:
+      - lambda: 'id(rf_cover_2).set_close_duration((uint32_t) (x * 1000.0f));'
+  - platform: template
+    name: "RF Cover 3 Open Duration"
+    id: rf_cover_3_open_s
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    min_value: 1
+    max_value: 120
+    step: 0.5
+    unit_of_measurement: "s"
+    mode: box
+    on_value:
+      - lambda: 'id(rf_cover_3).set_open_duration((uint32_t) (x * 1000.0f));'
+  - platform: template
+    name: "RF Cover 3 Close Duration"
+    id: rf_cover_3_close_s
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    min_value: 1
+    max_value: 120
+    step: 0.5
+    unit_of_measurement: "s"
+    mode: box
+    on_value:
+      - lambda: 'id(rf_cover_3).set_close_duration((uint32_t) (x * 1000.0f));'
+  - platform: template
+    name: "RF Cover 4 Open Duration"
+    id: rf_cover_4_open_s
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    min_value: 1
+    max_value: 120
+    step: 0.5
+    unit_of_measurement: "s"
+    mode: box
+    on_value:
+      - lambda: 'id(rf_cover_4).set_open_duration((uint32_t) (x * 1000.0f));'
+  - platform: template
+    name: "RF Cover 4 Close Duration"
+    id: rf_cover_4_close_s
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    min_value: 1
+    max_value: 120
+    step: 0.5
+    unit_of_measurement: "s"
+    mode: box
+    on_value:
+      - lambda: 'id(rf_cover_4).set_close_duration((uint32_t) (x * 1000.0f));'
+
 # Script for sending raw IR signals
 script:
   - id: send_raw_signal
@@ -718,23 +965,54 @@ script:
             times: 8
             wait_time: 0us
 
+  # Plays the slot assigned to a cover action. cover is 0-3; cmd is 0=open,
+  # 1=close, 2=stop. Mappings live at NVS index 200+cover as [open, close,
+  # stop] slot indices, -1 when unassigned.
+  - id: cover_cmd
+    mode: queued
+    parameters:
+      cover: int
+      cmd: int
+    then:
+      - lambda: |-
+          std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + cover);
+          static const char *CMDS[3] = {"OPEN", "CLOSE", "STOP"};
+          if (m.size() < 3 || m[cmd] < 10) {
+            ESP_LOGW("RF_COVER", "Cover %d has no slot assigned for %s", cover + 1, CMDS[cmd]);
+            id(rf_status_text).publish_state("Cover action not assigned");
+            id(cover_tmp_slot) = -1;
+            return;
+          }
+          id(cover_tmp_slot) = m[cmd];
+          ESP_LOGI("RF_COVER", "Cover %d %s -> slot %d", cover + 1, CMDS[cmd], m[cmd]);
+      - if:
+          condition:
+            lambda: 'return id(cover_tmp_slot) >= 10;'
+          then:
+            - script.execute:
+                id: send_raw_rf_signal
+                slot: !lambda 'return id(cover_tmp_slot);'
+            - script.wait: send_raw_rf_signal
+
   # Script for sending learned RF433 signals
   - id: send_raw_rf_signal
+    parameters:
+      slot: int
     then:
       # Load [type, code_high, code_low] from NVS and rebuild the 64-bit code
       # into the temp globals that the transmit branches read via !lambda.
       # type > 0 is an rc_switch protocol number; type -1 is Dooya; -2 is A-OK.
       - lambda: |-
-          std::vector<int> d = id(signal_nvs).load_from_nvs<int>(id(rf_signal_select_index));
+          std::vector<int> d = id(signal_nvs).load_from_nvs<int>(slot);
           if (d.size() >= 3) {
             id(rf_tx_protocol) = d[0];
             id(rf_tx_code) = ((uint64_t) (uint32_t) d[1] << 32) | (uint32_t) d[2];
             ESP_LOGI("RF_SEND", "Sending type=%d code=%llu slot=%d",
-                     id(rf_tx_protocol), (unsigned long long) id(rf_tx_code), id(rf_signal_select_index));
+                     id(rf_tx_protocol), (unsigned long long) id(rf_tx_code), slot);
             id(rf_status_text).publish_state("Sending signal...");
           } else {
             id(rf_tx_protocol) = 0;
-            ESP_LOGW("RF_SEND", "No signal stored in slot %d", id(rf_signal_select_index));
+            ESP_LOGW("RF_SEND", "No signal stored in slot %d", slot);
             id(rf_status_text).publish_state("No signal in this slot");
           }
       # Dooya playback through ESPHome's own encoder, from the stored fields.
