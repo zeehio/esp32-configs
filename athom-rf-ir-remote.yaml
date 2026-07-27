@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.3.1"
+  project_version: "v3.4.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -41,6 +41,11 @@ substitutions:
 #########################GPIO######################
 
 esphome:
+  # The cover-code cache lives in RAM; rebuild it from NVS after every boot
+  on_boot:
+    priority: -100
+    then:
+      - script.execute: rebuild_cover_cache
   name: "${name}"
   friendly_name: "${friendly_name}"
   comment: "${device_description}"
@@ -120,6 +125,43 @@ globals:
     type: int
     restore_value: no
     initial_value: '-1'
+  # RAM cache of the codes assigned to each cover action, indexed cover*3+action
+  # (action 0=open 1=close 2=stop). Type 0 marks an unassigned entry. Rebuilt
+  # from NVS at boot and whenever slots or assignments change, so matching a
+  # received frame is a 12-entry scan instead of NVS reads in the receive path.
+  - id: cover_code_type
+    type: std::vector<int>
+    restore_value: no
+    initial_value: 'std::vector<int>(12, 0)'
+  - id: cover_code_val
+    type: std::vector<uint64_t>
+    restore_value: no
+    initial_value: 'std::vector<uint64_t>(12, 0)'
+  # Received frame handed from the receive hooks to rf_rx_dispatch
+  - id: rx_type
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: rx_code
+    type: uint64_t
+    restore_value: no
+    initial_value: '0'
+  # Debounce for remote bursts: one physical press decodes as many frames
+  - id: rx_last_key
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  - id: rx_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # Anti-echo window: while set, cover_cmd updates position without
+  # retransmitting, because the command came from a physical remote the motor
+  # already heard
+  - id: rf_echo_until
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
 
 # Flash storage component for saving IR signals
 Flash_comp:
@@ -239,31 +281,31 @@ remote_receiver:
     # slots safely (its playback requires protocol > 0).
     on_rc_switch:
       - lambda: |-
-          if (id(is_rf_learning_mode)) {
-            // A-OK covers/awnings (reverse-engineered in
-            // github.com/akirjavainen/A-OK): 65-bit frames of
-            // [start 0xA3][24-bit ID][16-bit address][8-bit cmd][8-bit
-            // checksum][constant 1]. rc_switch protocol 6 is the same
-            // pulse-distance scheme, so it decodes the first 64 bits
-            // correctly; the constant trailing 1 never reaches the code.
-            // rc_switch cannot report a bit count, but the checksum only
-            // validates if all 64 bits arrived, so a passing checksum is
-            // both the completeness check and the protocol identification:
-            // shorter codes (EV1527 etc.) have a zero top byte, never 0xA3.
-            if (x.protocol == 6) {
-              uint8_t b[8];
-              for (int i = 0; i < 8; i++) b[i] = (uint8_t) (x.code >> (56 - 8 * i));
-              uint8_t cks = (uint8_t) ((b[1] + b[2] + b[3] + b[4] + b[5] + b[6]) & 0xFF);
-              if (b[0] == 0xA3 && cks == b[7]) {
-                // The remote follows every UP/DOWN with an "after up/down"
-                // burst (cmd 0x24). Storing that instead of the button's real
-                // command would be useless, so skip it and keep listening -
-                // the real command was already stored from the first burst,
-                // or will arrive on the next press.
-                if (b[6] == 0x24) {
-                  ESP_LOGD("RF_LEARNING", "Ignoring A-OK follow-up frame (cmd 0x24)");
-                  return;
-                }
+          // A-OK covers/awnings (reverse-engineered in
+          // github.com/akirjavainen/A-OK): 65-bit frames of
+          // [start 0xA3][24-bit ID][16-bit address][8-bit cmd][8-bit
+          // checksum][constant 1]. rc_switch protocol 6 is the same
+          // pulse-distance scheme, so it decodes the first 64 bits
+          // correctly; the constant trailing 1 never reaches the code.
+          // rc_switch cannot report a bit count, but the checksum only
+          // validates if all 64 bits arrived, so a passing checksum is
+          // both the completeness check and the protocol identification:
+          // shorter codes (EV1527 etc.) have a zero top byte, never 0xA3.
+          bool aok = false;
+          if (x.protocol == 6) {
+            uint8_t b[8];
+            for (int i = 0; i < 8; i++) b[i] = (uint8_t) (x.code >> (56 - 8 * i));
+            uint8_t cks = (uint8_t) ((b[1] + b[2] + b[3] + b[4] + b[5] + b[6]) & 0xFF);
+            if (b[0] == 0xA3 && cks == b[7]) {
+              // The remote follows every UP/DOWN with an "after up/down"
+              // burst (cmd 0x24). It is neither worth storing nor a command
+              // by itself, so it is skipped in both learning and matching.
+              if (b[6] == 0x24) {
+                ESP_LOGD("RF_LEARNING", "Ignoring A-OK follow-up frame (cmd 0x24)");
+                return;
+              }
+              aok = true;
+              if (id(is_rf_learning_mode)) {
                 std::vector<int> d;
                 d.push_back(-2);
                 d.push_back((int) (x.code >> 32));
@@ -273,9 +315,12 @@ remote_receiver:
                          b[1], b[2], b[3], b[4], b[5], b[6], id(rf_signal_select_index));
                 id(is_rf_learning_mode) = false;
                 id(rf_status_text).publish_state("A-OK signal learned!");
+                id(rebuild_cover_cache).execute();
                 return;
               }
             }
+          }
+          if (id(is_rf_learning_mode)) {
             std::vector<int> d;
             d.push_back((int) x.protocol);
             d.push_back((int) (x.code >> 32));
@@ -285,7 +330,15 @@ remote_receiver:
                      x.protocol, (unsigned long long) x.code, id(rf_signal_select_index));
             id(is_rf_learning_mode) = false;
             id(rf_status_text).publish_state("Signal learned!");
+            id(rebuild_cover_cache).execute();
+            return;
           }
+          // Not learning: a frame from a physical remote may belong to one of
+          // the covers - hand it to the matcher so the position estimate
+          // follows remote presses too.
+          id(rx_type) = aok ? -2 : (int) x.protocol;
+          id(rx_code) = x.code;
+          id(rf_rx_dispatch).execute();
     # Dooya learning from raw timings. On this board the receiver's captures
     # are sign-flipped and start at the ~1500us header SPACE - the 5000us
     # header mark is swallowed as pre-capture idle - so ESPHome's on_dooya
@@ -298,8 +351,6 @@ remote_receiver:
     # 40-bit frame, and read bits as (long,short)=1 / (short,long)=0.
     on_raw:
       - lambda: |-
-          if (!id(is_rf_learning_mode))
-            return;
           std::vector<int> body;
           body.reserve(80);
           for (int32_t v : x) {
@@ -332,16 +383,25 @@ remote_receiver:
           uint8_t d_ch = (uint8_t) ((bits >> 8) & 0xFF);
           uint8_t d_btn = (uint8_t) ((bits >> 4) & 0xF);
           uint8_t d_chk = (uint8_t) (bits & 0xF);
-          std::vector<int> d;
-          d.push_back(-1);
-          d.push_back((int) (bits >> 32));
-          d.push_back((int) (bits & 0xFFFFFFFF));
-          id(signal_nvs).save_to_nvs(id(rf_signal_select_index), d);
-          ESP_LOGI("RF_LEARNING", "Learned Dooya id=0x%06X channel=%d button=%d check=%d slot=%d",
-                   (unsigned int) d_id, (int) d_ch, (int) d_btn, (int) d_chk,
-                   id(rf_signal_select_index));
-          id(is_rf_learning_mode) = false;
-          id(rf_status_text).publish_state("Dooya signal learned!");
+          if (id(is_rf_learning_mode)) {
+            std::vector<int> d;
+            d.push_back(-1);
+            d.push_back((int) (bits >> 32));
+            d.push_back((int) (bits & 0xFFFFFFFF));
+            id(signal_nvs).save_to_nvs(id(rf_signal_select_index), d);
+            ESP_LOGI("RF_LEARNING", "Learned Dooya id=0x%06X channel=%d button=%d check=%d slot=%d",
+                     (unsigned int) d_id, (int) d_ch, (int) d_btn, (int) d_chk,
+                     id(rf_signal_select_index));
+            id(is_rf_learning_mode) = false;
+            id(rf_status_text).publish_state("Dooya signal learned!");
+            id(rebuild_cover_cache).execute();
+            return;
+          }
+          // Not learning: a valid Dooya frame from a physical remote may
+          // belong to a cover - hand it to the matcher.
+          id(rx_type) = -1;
+          id(rx_code) = bits;
+          id(rf_rx_dispatch).execute();
     # Kept for boards whose receiver polarity lets ESPHome's own decoder see
     # the full header; on this hardware it never fires (see on_raw above).
     # Harmless overlap: whichever path stores first clears the learning flag.
@@ -560,6 +620,7 @@ button:
           id(signal_nvs).save_to_nvs(id(rf_signal_select_index), empty_signal);
           ESP_LOGI("RF_LEARNING", "Cleared slot %d", id(rf_signal_select_index));
           id(rf_status_text).publish_state("Slot cleared");
+      - script.execute: rebuild_cover_cache
 
   # Cover assignment: pick the cover in "RF Cover Config", select a learned
   # slot in "RF Signal Slot", then press one of these to wire that slot to the
@@ -577,6 +638,7 @@ button:
           id(signal_nvs).save_to_nvs(200 + c, m);
           ESP_LOGI("RF_COVER", "Cover %d OPEN = slot %d", c + 1, m[0]);
           id(rf_status_text).publish_state("Cover OPEN assigned");
+      - script.execute: rebuild_cover_cache
   - platform: template
     name: "Cover assign slot as CLOSE"
     icon: mdi:arrow-down-bold-box
@@ -590,6 +652,7 @@ button:
           id(signal_nvs).save_to_nvs(200 + c, m);
           ESP_LOGI("RF_COVER", "Cover %d CLOSE = slot %d", c + 1, m[1]);
           id(rf_status_text).publish_state("Cover CLOSE assigned");
+      - script.execute: rebuild_cover_cache
   - platform: template
     name: "Cover assign slot as STOP"
     icon: mdi:stop-circle-outline
@@ -603,6 +666,7 @@ button:
           id(signal_nvs).save_to_nvs(200 + c, m);
           ESP_LOGI("RF_COVER", "Cover %d STOP = slot %d", c + 1, m[2]);
           id(rf_status_text).publish_state("Cover STOP assigned");
+      - script.execute: rebuild_cover_cache
 
 light:
   - platform: status_led
@@ -965,6 +1029,66 @@ script:
             times: 8
             wait_time: 0us
 
+  # Rebuilds the RAM cache of cover-assigned codes from NVS. Runs at boot and
+  # after anything that can change an assignment or a slot's contents.
+  - id: rebuild_cover_cache
+    mode: queued
+    then:
+      - lambda: |-
+          int assigned = 0;
+          for (int c = 0; c < 4; c++) {
+            std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
+            for (int a = 0; a < 3; a++) {
+              int idx = c * 3 + a;
+              id(cover_code_type)[idx] = 0;
+              id(cover_code_val)[idx] = 0;
+              if (m.size() < 3 || m[a] < 10) continue;
+              std::vector<int> d = id(signal_nvs).load_from_nvs<int>(m[a]);
+              if (d.size() < 3) continue;
+              id(cover_code_type)[idx] = d[0];
+              id(cover_code_val)[idx] = ((uint64_t) (uint32_t) d[1] << 32) | (uint32_t) d[2];
+              assigned++;
+            }
+          }
+          ESP_LOGI("RF_COVER", "Cover code cache rebuilt: %d actions assigned", assigned);
+
+  # A frame from a physical remote arrived (rx_type/rx_code). If it matches a
+  # code assigned to a cover, drive that cover's time-based state machine so
+  # the position estimate follows the remote - WITHOUT retransmitting, since
+  # the motor already heard the remote directly. The echo window makes
+  # cover_cmd skip the transmit for calls triggered from here.
+  - id: rf_rx_dispatch
+    mode: queued
+    then:
+      - lambda: |-
+          int match = -1;
+          for (int i = 0; i < 12; i++) {
+            if (id(cover_code_type)[i] != 0 &&
+                id(cover_code_type)[i] == id(rx_type) &&
+                id(cover_code_val)[i] == id(rx_code)) { match = i; break; }
+          }
+          if (match < 0)
+            return;
+          // One press decodes as a burst of identical frames: refresh the
+          // debounce on every frame, act only on the first.
+          uint32_t now = millis();
+          bool repeat = (match == id(rx_last_key)) && (now - id(rx_last_ms) < 1500);
+          id(rx_last_key) = match;
+          id(rx_last_ms) = now;
+          if (repeat)
+            return;
+          int c = match / 3, a = match % 3;
+          static const char *CMDS[3] = {"OPEN", "CLOSE", "STOP"};
+          ESP_LOGI("RF_COVER", "Physical remote: cover %d %s - updating position, not retransmitting",
+                   c + 1, CMDS[a]);
+          id(rf_echo_until) = now + 800;
+          cover::Cover *covers[4] = {id(rf_cover_1), id(rf_cover_2), id(rf_cover_3), id(rf_cover_4)};
+          auto call = covers[c]->make_call();
+          if (a == 0) call.set_command_open();
+          else if (a == 1) call.set_command_close();
+          else call.set_command_stop();
+          call.perform();
+
   # Plays the slot assigned to a cover action. cover is 0-3; cmd is 0=open,
   # 1=close, 2=stop. Mappings live at NVS index 200+cover as [open, close,
   # stop] slot indices, -1 when unassigned.
@@ -975,8 +1099,15 @@ script:
       cmd: int
     then:
       - lambda: |-
-          std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + cover);
           static const char *CMDS[3] = {"OPEN", "CLOSE", "STOP"};
+          // Command echoed from a physical remote press: the motor already
+          // received it over the air, only the position estimate moves.
+          if (millis() < id(rf_echo_until)) {
+            ESP_LOGD("RF_COVER", "Cover %d %s came from a remote - no retransmit", cover + 1, CMDS[cmd]);
+            id(cover_tmp_slot) = -1;
+            return;
+          }
+          std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + cover);
           if (m.size() < 3 || m[cmd] < 10) {
             ESP_LOGW("RF_COVER", "Cover %d has no slot assigned for %s", cover + 1, CMDS[cmd]);
             id(rf_status_text).publish_state("Cover action not assigned");
