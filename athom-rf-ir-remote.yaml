@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.4.1"
+  project_version: "v3.5.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -45,7 +45,9 @@ esphome:
   on_boot:
     priority: -100
     then:
-      - lambda: 'ESP_LOGW("BUILD", "running ${project_version}");'
+      - lambda: |-
+          ESP_LOGW("BUILD", "running ${project_version}");
+          id(ha_event).execute(std::string("Booted ${project_version}"));
       - script.execute: rebuild_cover_cache
   name: "${name}"
   friendly_name: "${friendly_name}"
@@ -316,6 +318,12 @@ remote_receiver:
                          b[1], b[2], b[3], b[4], b[5], b[6], id(rf_signal_select_index));
                 id(is_rf_learning_mode) = false;
                 id(rf_status_text).publish_state("A-OK signal learned!");
+                {
+                  char eb[72];
+                  snprintf(eb, sizeof(eb), "Learned A-OK code=0x%016llX slot=%d",
+                           (unsigned long long) x.code, id(rf_signal_select_index));
+                  id(ha_event).execute(std::string(eb));
+                }
                 id(rebuild_cover_cache).execute();
                 return;
               }
@@ -331,6 +339,12 @@ remote_receiver:
                      x.protocol, (unsigned long long) x.code, id(rf_signal_select_index));
             id(is_rf_learning_mode) = false;
             id(rf_status_text).publish_state("Signal learned!");
+            {
+              char eb[72];
+              snprintf(eb, sizeof(eb), "Learned rc_switch proto=%u code=%llu slot=%d",
+                       x.protocol, (unsigned long long) x.code, id(rf_signal_select_index));
+              id(ha_event).execute(std::string(eb));
+            }
             id(rebuild_cover_cache).execute();
             return;
           }
@@ -395,6 +409,12 @@ remote_receiver:
                      id(rf_signal_select_index));
             id(is_rf_learning_mode) = false;
             id(rf_status_text).publish_state("Dooya signal learned!");
+            {
+              char eb[80];
+              snprintf(eb, sizeof(eb), "Learned Dooya id=0x%06X ch=%d btn=%d slot=%d",
+                       (unsigned int) d_id, (int) d_ch, (int) d_btn, id(rf_signal_select_index));
+              id(ha_event).execute(std::string(eb));
+            }
             id(rebuild_cover_cache).execute();
             return;
           }
@@ -423,6 +443,13 @@ remote_receiver:
                      id(rf_signal_select_index));
             id(is_rf_learning_mode) = false;
             id(rf_status_text).publish_state("Dooya signal learned!");
+            {
+              char eb[80];
+              snprintf(eb, sizeof(eb), "Learned Dooya id=0x%06X ch=%d btn=%d slot=%d",
+                       (unsigned int) x.id, (int) x.channel, (int) x.button, id(rf_signal_select_index));
+              id(ha_event).execute(std::string(eb));
+            }
+            id(rebuild_cover_cache).execute();
           }
 
   - pin:
@@ -707,6 +734,24 @@ text_sensor:
     name: "RF Learning Status"
     id: rf_status_text
     icon: mdi:information
+
+  # The web frontend only streams logs while the page is open, so the
+  # diagnostics that matter are also published as entities: Home Assistant
+  # keeps their full state history, and ha_event additionally pushes each one
+  # into the HA logbook (requires allowing the device to perform Home
+  # Assistant actions in the ESPHome integration settings).
+  - platform: template
+    name: "RF Event"
+    id: rf_event_text
+    icon: mdi:message-flash
+
+  # Compact live view of the cover assignments, refreshed on every cache
+  # rebuild: "C1 o:13 c:14 s:15 | C2 ..." with '-' for unassigned.
+  - platform: template
+    name: "Cover Assignments"
+    id: cover_assign_text
+    icon: mdi:table-cog
+    entity_category: diagnostic
 
 # Signal slot selector
 select:
@@ -1030,6 +1075,24 @@ script:
             times: 8
             wait_time: 0us
 
+  # Publishes a diagnostic event where it survives: the RF Event entity (Home
+  # Assistant records its state history) and the HA logbook. The logbook push
+  # needs "allow the device to perform Home Assistant actions" enabled in the
+  # ESPHome integration settings; without it, the entity still updates.
+  - id: ha_event
+    mode: queued
+    parameters:
+      msg: string
+    then:
+      - text_sensor.template.publish:
+          id: rf_event_text
+          state: !lambda 'return msg;'
+      - homeassistant.action:
+          action: logbook.log
+          data:
+            name: "RF433"
+            message: !lambda 'return msg;'
+
   # Rebuilds the RAM cache of cover-assigned codes from NVS. Runs at boot and
   # after anything that can change an assignment or a slot's contents.
   - id: rebuild_cover_cache
@@ -1056,6 +1119,23 @@ script:
             }
           }
           ESP_LOGI("RF_COVER", "Cover code cache rebuilt: %d of 12 actions assigned", assigned);
+          std::string sum;
+          char sb[24];
+          for (int c = 0; c < 4; c++) {
+            std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
+            snprintf(sb, sizeof(sb), "%sC%d", c ? " | " : "", c + 1);
+            sum += sb;
+            static const char TAGC[3] = {'o', 'c', 's'};
+            for (int a = 0; a < 3; a++) {
+              if (m.size() >= 3 && m[a] >= 10) snprintf(sb, sizeof(sb), " %c:%d", TAGC[a], m[a]);
+              else snprintf(sb, sizeof(sb), " %c:-", TAGC[a]);
+              sum += sb;
+            }
+          }
+          id(cover_assign_text).publish_state(sum);
+          char eb[64];
+          snprintf(eb, sizeof(eb), "Cover cache: %d of 12 actions assigned", assigned);
+          id(ha_event).execute(std::string(eb));
 
   # A frame from a physical remote arrived (rx_type/rx_code). If it matches a
   # code assigned to a cover, drive that cover's time-based state machine so
@@ -1079,6 +1159,18 @@ script:
             if (id(rx_type) < 0) {
               ESP_LOGI("RF_COVER", "Remote frame type=%d code=0x%016llX matches no cover assignment",
                        id(rx_type), (unsigned long long) id(rx_code));
+              // One press = a burst of identical frames; report it once
+              static uint64_t last_um_code = 0;
+              static uint32_t last_um_ms = 0;
+              uint32_t umnow = millis();
+              if (id(rx_code) != last_um_code || umnow - last_um_ms > 1500) {
+                char b[80];
+                snprintf(b, sizeof(b), "Unmatched remote frame type=%d code=0x%016llX",
+                         id(rx_type), (unsigned long long) id(rx_code));
+                id(ha_event).execute(std::string(b));
+              }
+              last_um_code = id(rx_code);
+              last_um_ms = umnow;
             } else {
               ESP_LOGD("RF_COVER", "rc_switch frame proto=%d code=0x%016llX matches no cover assignment",
                        id(rx_type), (unsigned long long) id(rx_code));
@@ -1097,6 +1189,11 @@ script:
           static const char *CMDS[3] = {"OPEN", "CLOSE", "STOP"};
           ESP_LOGI("RF_COVER", "Physical remote: cover %d %s - updating position, not retransmitting",
                    c + 1, CMDS[a]);
+          {
+            char b[48];
+            snprintf(b, sizeof(b), "Remote press: cover %d %s", c + 1, CMDS[a]);
+            id(ha_event).execute(std::string(b));
+          }
           id(rf_echo_until) = now + 800;
           cover::Cover *covers[4] = {id(rf_cover_1), id(rf_cover_2), id(rf_cover_3), id(rf_cover_4)};
           auto call = covers[c]->make_call();
