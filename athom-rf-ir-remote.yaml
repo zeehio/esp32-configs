@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.5.1"
+  project_version: "v3.5.2"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -753,6 +753,31 @@ text_sensor:
     icon: mdi:table-cog
     entity_category: diagnostic
 
+  # The slot number alone doesn't say whether it's the right code - comparing
+  # against an "Unmatched remote frame" event meant re-deriving it from the
+  # boot log. These hold the actual assigned codes per cover, so the compare
+  # is direct: read the code here, read the code in the unmatched event, done.
+  - platform: template
+    name: "Cover 1 Codes"
+    id: cover_1_codes
+    icon: mdi:code-tags
+    entity_category: diagnostic
+  - platform: template
+    name: "Cover 2 Codes"
+    id: cover_2_codes
+    icon: mdi:code-tags
+    entity_category: diagnostic
+  - platform: template
+    name: "Cover 3 Codes"
+    id: cover_3_codes
+    icon: mdi:code-tags
+    entity_category: diagnostic
+  - platform: template
+    name: "Cover 4 Codes"
+    id: cover_4_codes
+    icon: mdi:code-tags
+    entity_category: diagnostic
+
 # Signal slot selector
 select:
   - platform: template
@@ -1121,16 +1146,29 @@ script:
           ESP_LOGI("RF_COVER", "Cover code cache rebuilt: %d of 12 actions assigned", assigned);
           std::string sum;
           char sb[24];
+          static const char TAGC[3] = {'o', 'c', 's'};
+          text_sensor::TextSensor *code_sensors[4] = {
+              id(cover_1_codes), id(cover_2_codes), id(cover_3_codes), id(cover_4_codes)};
           for (int c = 0; c < 4; c++) {
             std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
             snprintf(sb, sizeof(sb), "%sC%d", c ? " | " : "", c + 1);
             sum += sb;
-            static const char TAGC[3] = {'o', 'c', 's'};
+            std::string codes;
             for (int a = 0; a < 3; a++) {
-              if (m.size() >= 3 && m[a] >= 10) snprintf(sb, sizeof(sb), " %c:%d", TAGC[a], m[a]);
+              bool have = m.size() >= 3 && m[a] >= 10;
+              if (have) snprintf(sb, sizeof(sb), " %c:%d", TAGC[a], m[a]);
               else snprintf(sb, sizeof(sb), " %c:-", TAGC[a]);
               sum += sb;
+              int idx = c * 3 + a;
+              char cb[28];
+              if (have && id(cover_code_type)[idx] != 0)
+                snprintf(cb, sizeof(cb), "%c:0x%016llX ", TAGC[a],
+                         (unsigned long long) id(cover_code_val)[idx]);
+              else
+                snprintf(cb, sizeof(cb), "%c:- ", TAGC[a]);
+              codes += cb;
             }
+            code_sensors[c]->publish_state(codes);
           }
           id(cover_assign_text).publish_state(sum);
           char eb[64];
