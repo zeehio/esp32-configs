@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.5.0"
+  project_version: "v3.5.1"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -1146,11 +1146,19 @@ script:
     mode: queued
     then:
       - lambda: |-
+          // Dooya's low 4 bits are a "check" value that climbs while a button
+          // is held (ESPHome's own docs: "includes an indication that a
+          // button is being held down") - it is not part of the command's
+          // identity, so it is masked out of the comparison. A slot learned
+          // at one check value would otherwise only ever re-match by luck,
+          // when a later hold's counter happens to sweep back through it.
+          // A-OK and rc_switch codes are fixed per command and compared whole.
+          uint64_t dmask = (id(rx_type) == -1) ? ~0xFULL : ~0ULL;
           int match = -1;
           for (int i = 0; i < 12; i++) {
             if (id(cover_code_type)[i] != 0 &&
                 id(cover_code_type)[i] == id(rx_type) &&
-                id(cover_code_val)[i] == id(rx_code)) { match = i; break; }
+                ((id(cover_code_val)[i] ^ id(rx_code)) & dmask) == 0) { match = i; break; }
           }
           if (match < 0) {
             // A checksum-valid A-OK or fully-decoded Dooya frame is a real
@@ -1159,17 +1167,20 @@ script:
             if (id(rx_type) < 0) {
               ESP_LOGI("RF_COVER", "Remote frame type=%d code=0x%016llX matches no cover assignment",
                        id(rx_type), (unsigned long long) id(rx_code));
-              // One press = a burst of identical frames; report it once
-              static uint64_t last_um_code = 0;
+              // One press = a burst of frames whose Dooya check nibble climbs
+              // frame to frame; dedupe on the masked key so one press reports
+              // once instead of flooding the logbook with every check value.
+              static uint64_t last_um_key = 0;
               static uint32_t last_um_ms = 0;
               uint32_t umnow = millis();
-              if (id(rx_code) != last_um_code || umnow - last_um_ms > 1500) {
+              uint64_t um_key = id(rx_code) & dmask;
+              if (um_key != last_um_key || umnow - last_um_ms > 1500) {
                 char b[80];
                 snprintf(b, sizeof(b), "Unmatched remote frame type=%d code=0x%016llX",
                          id(rx_type), (unsigned long long) id(rx_code));
                 id(ha_event).execute(std::string(b));
               }
-              last_um_code = id(rx_code);
+              last_um_key = um_key;
               last_um_ms = umnow;
             } else {
               ESP_LOGD("RF_COVER", "rc_switch frame proto=%d code=0x%016llX matches no cover assignment",
@@ -1177,8 +1188,9 @@ script:
             }
             return;
           }
-          // One press decodes as a burst of identical frames: refresh the
-          // debounce on every frame, act only on the first.
+          // One press decodes as a burst of frames for the same action (their
+          // Dooya check nibble may climb frame to frame, already masked out
+          // above): refresh the debounce on every frame, act only on the first.
           uint32_t now = millis();
           bool repeat = (match == id(rx_last_key)) && (now - id(rx_last_ms) < 1500);
           id(rx_last_key) = match;
