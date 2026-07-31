@@ -94,13 +94,25 @@ globals:
     type: int
     restore_value: yes
     initial_value: '10'
-  # Temp holders for the rc_switch code/protocol to transmit; referenced by
-  # transmit_rc_switch_raw's !lambda during playback
+  # Temp holders for the rc_switch code/protocol/bit-count to transmit;
+  # referenced by transmit_rc_switch_raw's !lambda during playback
   - id: rf_tx_code
     type: uint64_t
     restore_value: no
     initial_value: '0'
   - id: rf_tx_protocol
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: rf_tx_nbits
+    type: int
+    restore_value: no
+    initial_value: '24'
+  # Raw sample count of the most recent RF433 reception, captured by
+  # on_raw so on_rc_switch (which fires next, for the same reception) can
+  # derive the actual bit count - ESPHome's on_rc_switch never exposes it
+  # directly. See the rf_receiver block below.
+  - id: rf_learn_raw_len
     type: int
     restore_value: no
     initial_value: '0'
@@ -209,6 +221,19 @@ remote_receiver:
     idle: 4ms
     tolerance: 50%
     id: rf_receiver
+    # on_raw here is not a storage format - it's a side channel to recover
+    # the bit count that ESPHome's on_rc_switch trigger never exposes
+    # (RCSwitchData only carries protocol+code). ESPHome always runs
+    # on_raw's listener before on_rc_switch's for the same reception
+    # (fixed by remote_base's internal trigger registration order, not
+    # yaml order), so by the time on_rc_switch runs immediately after,
+    # synchronously, for that same reception, rf_learn_raw_len already
+    # holds this reception's raw sample count.
+    on_raw:
+      - lambda: |-
+          if (id(is_rf_learning_mode)) {
+            id(rf_learn_raw_len) = (int) x.size();
+          }
     on_rc_switch:
       - lambda: |-
           if (id(is_rf_learning_mode)) {
@@ -216,9 +241,20 @@ remote_receiver:
             d.push_back((int) x.protocol);
             d.push_back((int) (x.code >> 32));
             d.push_back((int) (x.code & 0xFFFFFFFF));
+            // Each decoded bit consumes 2 raw samples (mark+space) for all
+            // 8 built-in protocols; the sync pulse consumes 2 samples for
+            // all of them except protocol 6, the only inverted one, which
+            // consumes 1 (verified against esphome's rc_switch_protocol.cpp).
+            int sync_len = (x.protocol == 6) ? 1 : 2;
+            int nbits = (id(rf_learn_raw_len) - sync_len) / 2;
+            if (nbits >= 1 && nbits <= 64) {
+              d.push_back(nbits);
+            } else {
+              ESP_LOGW("RF_LEARNING", "Implausible bit count %d, storing without explicit length (assumes 24 on send)", nbits);
+            }
             id(signal_nvs).save_to_nvs(id(rf_signal_select_index), d);
-            ESP_LOGI("RF_LEARNING", "Learned protocol=%u code=%llu slot=%d",
-                     x.protocol, (unsigned long long) x.code, id(rf_signal_select_index));
+            ESP_LOGI("RF_LEARNING", "Learned protocol=%u code=%llu nbits=%d slot=%d",
+                     x.protocol, (unsigned long long) x.code, d.size() >= 4 ? nbits : 24, id(rf_signal_select_index));
             id(is_rf_learning_mode) = false;
             id(rf_status_text).publish_state("Signal learned!");
           }
@@ -548,15 +584,19 @@ script:
   # Script for sending learned RF433 rc_switch signals
   - id: send_raw_rf_signal
     then:
-      # Load [protocol, code_high, code_low] from NVS and rebuild the 64-bit code
-      # into the temp globals that transmit_rc_switch_raw reads via !lambda.
+      # Load [protocol, code_high, code_low] (older slots) or [protocol,
+      # code_high, code_low, nbits] (slots learned since the bit-count fix)
+      # from NVS and rebuild the temp globals that transmit_rc_switch_raw
+      # reads via !lambda. Older slots have no stored bit count, so they
+      # keep the previous, implicit 24-bit assumption.
       - lambda: |-
           std::vector<int> d = id(signal_nvs).load_from_nvs<int>(id(rf_signal_select_index));
           if (d.size() >= 3) {
             id(rf_tx_protocol) = d[0];
             id(rf_tx_code) = ((uint64_t) (uint32_t) d[1] << 32) | (uint32_t) d[2];
-            ESP_LOGI("RF_SEND", "Sending protocol=%d code=%llu slot=%d",
-                     id(rf_tx_protocol), (unsigned long long) id(rf_tx_code), id(rf_signal_select_index));
+            id(rf_tx_nbits) = (d.size() >= 4) ? d[3] : 24;
+            ESP_LOGI("RF_SEND", "Sending protocol=%d code=%llu nbits=%d slot=%d",
+                     id(rf_tx_protocol), (unsigned long long) id(rf_tx_code), id(rf_tx_nbits), id(rf_signal_select_index));
             id(rf_status_text).publish_state("Sending signal...");
           } else {
             id(rf_tx_protocol) = 0;
@@ -570,12 +610,12 @@ script:
             - remote_transmitter.transmit_rc_switch_raw:
                 # protocol must be an RCSwitchBase: index the built-in table (1..8)
                 protocol: !lambda 'return esphome::remote_base::RC_SWITCH_PROTOCOLS[id(rf_tx_protocol)];'
-                # code must be an MSB-first binary string; its length is the bit count.
-                # on_rc_switch does not expose the received bit length, and virtually
-                # all 433MHz fixed-code remotes (EV1527/PT2262/…) are 24-bit.
+                # code must be an MSB-first binary string; its length is the bit
+                # count. rf_tx_nbits is the bit count derived at learn time (see
+                # rf_receiver above), or 24 for slots learned before that fix.
                 code: !lambda |-
                   uint64_t code = id(rf_tx_code);
-                  const int nbits = 24;
+                  const int nbits = id(rf_tx_nbits);
                   std::string s;
                   for (int i = nbits - 1; i >= 0; i--)
                     s += (code & ((uint64_t) 1 << i)) ? '1' : '0';
