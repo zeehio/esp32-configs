@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.9.0"
+  project_version: "v3.9.1"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -51,15 +51,17 @@ esphome:
       - script.execute: seed_known_codes
       - script.wait: seed_known_codes
       - script.execute: rebuild_cover_cache
-      # Covers are restore_mode: NO_RESTORE (position lives in cov_pos, which
-      # intentionally does not persist across reboots - see its comment in
-      # globals), so publish the fresh 0.5 default explicitly. Without this
-      # each cover's position would be whatever its uninitialized internal
-      # field happens to read until the first real move.
-      - cover.template.publish: { id: persiana_sala, position: 0.5, current_operation: "IDLE" }
-      - cover.template.publish: { id: persiana_dormitorio, position: 0.5, current_operation: "IDLE" }
-      - cover.template.publish: { id: persiana_elia, position: 0.5, current_operation: "IDLE" }
-      - cover.template.publish: { id: persiana_sofia, position: 0.5, current_operation: "IDLE" }
+      # Covers are restore_mode: NO_RESTORE (they don't carry their own
+      # position - cov_pos_0..3 does, restored independently above), so push
+      # the restored estimate into each cover explicitly. Without this each
+      # cover's position would be whatever its uninitialized internal field
+      # happens to read until the first real move. Read from cov_pos_N rather
+      # than hardcoded, so a genuinely restored value isn't clobbered back to
+      # 0.5 on every boot.
+      - cover.template.publish: { id: persiana_sala, position: !lambda 'return id(cov_pos_0);', current_operation: "IDLE" }
+      - cover.template.publish: { id: persiana_dormitorio, position: !lambda 'return id(cov_pos_1);', current_operation: "IDLE" }
+      - cover.template.publish: { id: persiana_elia, position: !lambda 'return id(cov_pos_2);', current_operation: "IDLE" }
+      - cover.template.publish: { id: persiana_sofia, position: !lambda 'return id(cov_pos_3);', current_operation: "IDLE" }
   name: "${name}"
   friendly_name: "${friendly_name}"
   comment: "${device_description}"
@@ -171,16 +173,35 @@ globals:
     restore_value: no
     initial_value: '-1'
   # --- Hand-rolled cover position tracking (cover_move_1..4 in script:) ---
-  # Position estimate per cover (0.0 closed .. 1.0 open), and per-move
-  # bookkeeping used to interpolate it while moving and to freeze it
-  # correctly on Stop. Not restored across reboots on purpose: a position
-  # left over from before a reboot is no more trustworthy than a fresh 0.5
-  # guess, given this is already just an elapsed-time estimate with no real
-  # feedback - see the reliability discussion this session.
-  - id: cov_pos
-    type: std::vector<float>
-    restore_value: no
-    initial_value: 'std::vector<float>(4, 0.5f)'
+  # Position estimate per cover (0.0 closed .. 1.0 open), restored across
+  # reboots. Four separate scalar globals rather than one std::vector: the
+  # restore mechanism (RestoringGlobalsComponent, esphome/components/globals/
+  # globals_component.h) persists a global via memcpy(sizeof(T)) - safe for a
+  # plain float, but for a std::vector that only captures its pointer/size/
+  # capacity control block, not the heap data it points to. Restoring that
+  # verbatim on the next boot would reload a dangling pointer from the
+  # previous boot's freed heap. Scalars sidestep the problem entirely.
+  - id: cov_pos_0
+    type: float
+    restore_value: yes
+    initial_value: '0.5f'
+  - id: cov_pos_1
+    type: float
+    restore_value: yes
+    initial_value: '0.5f'
+  - id: cov_pos_2
+    type: float
+    restore_value: yes
+    initial_value: '0.5f'
+  - id: cov_pos_3
+    type: float
+    restore_value: yes
+    initial_value: '0.5f'
+  # Per-move bookkeeping used to interpolate position while moving and to
+  # freeze it correctly on Stop. Unlike position itself, these are NOT
+  # restored: a move that was in progress before a reboot should not be
+  # assumed still running afterward (the motor lost power too), so cov_op
+  # always starts idle and a fresh move recomputes these from scratch.
   # 0=idle, 1=opening, 2=closing
   - id: cov_op
     type: std::vector<int>
@@ -947,12 +968,12 @@ cover:
             if (frac > 1.0f) frac = 1.0f;
             if (frac < 0.0f) frac = 0.0f;
             float from = id(cov_move_from)[0], to = id(cov_move_target)[0];
-            id(cov_pos)[0] = from + (to - from) * frac;
+            id(cov_pos_0) = from + (to - from) * frac;
             id(cov_op)[0] = 0;
           }
       - cover.template.publish:
           id: persiana_sala
-          position: !lambda 'return id(cov_pos)[0];'
+          position: !lambda 'return id(cov_pos_0);'
           current_operation: "IDLE"
       - script.execute: { id: cover_cmd, cover: 0, cmd: 2 }
   - platform: template
@@ -976,12 +997,12 @@ cover:
             if (frac > 1.0f) frac = 1.0f;
             if (frac < 0.0f) frac = 0.0f;
             float from = id(cov_move_from)[1], to = id(cov_move_target)[1];
-            id(cov_pos)[1] = from + (to - from) * frac;
+            id(cov_pos_1) = from + (to - from) * frac;
             id(cov_op)[1] = 0;
           }
       - cover.template.publish:
           id: persiana_dormitorio
-          position: !lambda 'return id(cov_pos)[1];'
+          position: !lambda 'return id(cov_pos_1);'
           current_operation: "IDLE"
       - script.execute: { id: cover_cmd, cover: 1, cmd: 2 }
   - platform: template
@@ -1005,12 +1026,12 @@ cover:
             if (frac > 1.0f) frac = 1.0f;
             if (frac < 0.0f) frac = 0.0f;
             float from = id(cov_move_from)[2], to = id(cov_move_target)[2];
-            id(cov_pos)[2] = from + (to - from) * frac;
+            id(cov_pos_2) = from + (to - from) * frac;
             id(cov_op)[2] = 0;
           }
       - cover.template.publish:
           id: persiana_elia
-          position: !lambda 'return id(cov_pos)[2];'
+          position: !lambda 'return id(cov_pos_2);'
           current_operation: "IDLE"
       - script.execute: { id: cover_cmd, cover: 2, cmd: 2 }
   - platform: template
@@ -1034,12 +1055,12 @@ cover:
             if (frac > 1.0f) frac = 1.0f;
             if (frac < 0.0f) frac = 0.0f;
             float from = id(cov_move_from)[3], to = id(cov_move_target)[3];
-            id(cov_pos)[3] = from + (to - from) * frac;
+            id(cov_pos_3) = from + (to - from) * frac;
             id(cov_op)[3] = 0;
           }
       - cover.template.publish:
           id: persiana_sofia
-          position: !lambda 'return id(cov_pos)[3];'
+          position: !lambda 'return id(cov_pos_3);'
           current_operation: "IDLE"
       - script.execute: { id: cover_cmd, cover: 3, cmd: 2 }
 
@@ -1483,7 +1504,7 @@ script:
       target: float
     then:
       - lambda: |-
-          float cur = id(cov_pos)[0];
+          float cur = id(cov_pos_0);
           bool opening = target >= cur;
           float span = fabsf(target - cur);
           // A same-position "resend" (e.g. pressing Open while already at
@@ -1508,11 +1529,11 @@ script:
       - script.wait: cover_cmd
       - delay: !lambda 'return id(cov_move_ms)[0];'
       - lambda: |-
-          id(cov_pos)[0] = id(cov_move_target)[0];
+          id(cov_pos_0) = id(cov_move_target)[0];
           id(cov_op)[0] = 0;
       - cover.template.publish:
           id: persiana_sala
-          position: !lambda 'return id(cov_pos)[0];'
+          position: !lambda 'return id(cov_pos_0);'
           current_operation: "IDLE"
       - if:
           condition:
@@ -1534,7 +1555,7 @@ script:
       target: float
     then:
       - lambda: |-
-          float cur = id(cov_pos)[1];
+          float cur = id(cov_pos_1);
           bool opening = target >= cur;
           float span = fabsf(target - cur);
           // A same-position "resend" (e.g. pressing Open while already at
@@ -1559,11 +1580,11 @@ script:
       - script.wait: cover_cmd
       - delay: !lambda 'return id(cov_move_ms)[1];'
       - lambda: |-
-          id(cov_pos)[1] = id(cov_move_target)[1];
+          id(cov_pos_1) = id(cov_move_target)[1];
           id(cov_op)[1] = 0;
       - cover.template.publish:
           id: persiana_dormitorio
-          position: !lambda 'return id(cov_pos)[1];'
+          position: !lambda 'return id(cov_pos_1);'
           current_operation: "IDLE"
       - if:
           condition:
@@ -1585,7 +1606,7 @@ script:
       target: float
     then:
       - lambda: |-
-          float cur = id(cov_pos)[2];
+          float cur = id(cov_pos_2);
           bool opening = target >= cur;
           float span = fabsf(target - cur);
           // A same-position "resend" (e.g. pressing Open while already at
@@ -1610,11 +1631,11 @@ script:
       - script.wait: cover_cmd
       - delay: !lambda 'return id(cov_move_ms)[2];'
       - lambda: |-
-          id(cov_pos)[2] = id(cov_move_target)[2];
+          id(cov_pos_2) = id(cov_move_target)[2];
           id(cov_op)[2] = 0;
       - cover.template.publish:
           id: persiana_elia
-          position: !lambda 'return id(cov_pos)[2];'
+          position: !lambda 'return id(cov_pos_2);'
           current_operation: "IDLE"
       - if:
           condition:
@@ -1636,7 +1657,7 @@ script:
       target: float
     then:
       - lambda: |-
-          float cur = id(cov_pos)[3];
+          float cur = id(cov_pos_3);
           bool opening = target >= cur;
           float span = fabsf(target - cur);
           // A same-position "resend" (e.g. pressing Open while already at
@@ -1661,11 +1682,11 @@ script:
       - script.wait: cover_cmd
       - delay: !lambda 'return id(cov_move_ms)[3];'
       - lambda: |-
-          id(cov_pos)[3] = id(cov_move_target)[3];
+          id(cov_pos_3) = id(cov_move_target)[3];
           id(cov_op)[3] = 0;
       - cover.template.publish:
           id: persiana_sofia
-          position: !lambda 'return id(cov_pos)[3];'
+          position: !lambda 'return id(cov_pos_3);'
           current_operation: "IDLE"
       - if:
           condition:
