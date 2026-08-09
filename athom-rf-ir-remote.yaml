@@ -1194,16 +1194,21 @@ script:
     mode: queued
     then:
       - lambda: |-
-          // Cover N action -> NVS slot. action 0=open 1=close 2=stop.
-          // Slots run 10-21: three consecutive slots per cover, in
-          // [open, stop, close] order on the "RF Signal Slot" selector -
-          // e.g. cover 1 is Signal 0/1/2 = slots 10/11/12 = open/stop/close.
-          static const int COVER_SLOTS[4][3] = {
-              {10, 12, 11},  // Cover 1: open=10 close=12 stop=11
-              {13, 15, 14},  // Cover 2: open=13 close=15 stop=14
-              {16, 18, 17},  // Cover 3: open=16 close=18 stop=17
-              {19, 21, 20},  // Cover 4: open=19 close=21 stop=20
-          };
+          // Cover N -> NVS slot, one flat array per action so each reads in
+          // plain ascending order exactly as assigned - slots run 10-21,
+          // three consecutive per cover, in [open, stop, close] order on the
+          // "RF Signal Slot" selector (cover 1 = Signal 0/1/2 = 10/11/12):
+          //   Cover 1: open=10 stop=11 close=12
+          //   Cover 2: open=13 stop=14 close=15
+          //   Cover 3: open=16 stop=17 close=18
+          //   Cover 4: open=19 stop=20 close=21
+          static const int COVER_OPEN[4]  = {10, 13, 16, 19};
+          static const int COVER_STOP[4]  = {11, 14, 17, 20};
+          static const int COVER_CLOSE[4] = {12, 15, 18, 21};
+          // Indexed by action (0=open,1=close,2=stop - the same convention
+          // the cover: platform's action calls and ANAMES/CMDS below use),
+          // so a loop over actions can pick the right array above.
+          static const int *ACTION_SLOTS[3] = {COVER_OPEN, COVER_CLOSE, COVER_STOP};
           static const char *ANAMES[3] = {"OPEN", "CLOSE", "STOP"};
           static const char TAGC[3] = {'o', 'c', 's'};
           int assigned = 0;
@@ -1217,7 +1222,7 @@ script:
             std::string codes;
             for (int a = 0; a < 3; a++) {
               int idx = c * 3 + a;
-              int slot = COVER_SLOTS[c][a];
+              int slot = ACTION_SLOTS[a][c];
               std::vector<int> d = id(signal_nvs).load_from_nvs<int>(slot);
               char cb[28];
               if (d.size() >= 3) {
@@ -1326,9 +1331,9 @@ script:
 
   # Plays the slot mapped to a cover action. cover is 0-3; cmd is 0=open,
   # 1=close, 2=stop. The mapping is fixed at build time (see the identical
-  # COVER_SLOTS table in rebuild_cover_cache) - three consecutive slots per
-  # cover, [open, stop, close] order: cover 1 = slots 10/11/12, cover 2 =
-  # 13/14/15, cover 3 = 16/17/18, cover 4 = 19/20/21.
+  # COVER_OPEN/STOP/CLOSE arrays in rebuild_cover_cache) - three consecutive
+  # slots per cover, [open, stop, close] order: cover 1 = slots 10/11/12,
+  # cover 2 = 13/14/15, cover 3 = 16/17/18, cover 4 = 19/20/21.
   - id: cover_cmd
     mode: queued
     parameters:
@@ -1336,8 +1341,10 @@ script:
       cmd: int
     then:
       - lambda: |-
-          static const int COVER_SLOTS[4][3] = {
-              {10, 12, 11}, {13, 15, 14}, {16, 18, 17}, {19, 21, 20}};
+          static const int COVER_OPEN[4]  = {10, 13, 16, 19};
+          static const int COVER_STOP[4]  = {11, 14, 17, 20};
+          static const int COVER_CLOSE[4] = {12, 15, 18, 21};
+          static const int *ACTION_SLOTS[3] = {COVER_OPEN, COVER_CLOSE, COVER_STOP};
           static const char *CMDS[3] = {"OPEN", "CLOSE", "STOP"};
           // Command echoed from a physical remote press: the motor already
           // received it over the air, only the position estimate moves.
@@ -1346,7 +1353,7 @@ script:
             id(cover_tmp_slot) = -1;
             return;
           }
-          int slot = COVER_SLOTS[cover][cmd];
+          int slot = ACTION_SLOTS[cmd][cover];
           std::vector<int> d = id(signal_nvs).load_from_nvs<int>(slot);
           if (d.size() < 3) {
             ESP_LOGW("RF_COVER", "Cover %d slot %d (%s) has no learned signal", cover + 1, slot, CMDS[cmd]);
