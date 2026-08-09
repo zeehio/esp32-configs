@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.9.1"
+  project_version: "v3.10.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -1527,7 +1527,23 @@ script:
           cover: 0
           cmd: !lambda 'return id(cov_op)[0] == 1 ? 0 : 1;'
       - script.wait: cover_cmd
-      - delay: !lambda 'return id(cov_move_ms)[0];'
+      # Republish an interpolated position every second while moving, so the
+      # Home Assistant slider animates live instead of jumping straight from
+      # the start position to the end position when the move completes.
+      - while:
+          condition:
+            lambda: 'return (millis() - id(cov_move_start_ms)[0]) < id(cov_move_ms)[0];'
+          then:
+            - delay: 1000ms
+            - lambda: |-
+                uint32_t elapsed = millis() - id(cov_move_start_ms)[0];
+                float frac = (float) elapsed / (float) id(cov_move_ms)[0];
+                if (frac > 1.0f) frac = 1.0f;
+                float from = id(cov_move_from)[0], to = id(cov_move_target)[0];
+                id(cov_pos_0) = from + (to - from) * frac;
+            - cover.template.publish:
+                id: persiana_sala
+                position: !lambda 'return id(cov_pos_0);'
       - lambda: |-
           id(cov_pos_0) = id(cov_move_target)[0];
           id(cov_op)[0] = 0;
@@ -1578,7 +1594,23 @@ script:
           cover: 1
           cmd: !lambda 'return id(cov_op)[1] == 1 ? 0 : 1;'
       - script.wait: cover_cmd
-      - delay: !lambda 'return id(cov_move_ms)[1];'
+      # Republish an interpolated position every second while moving, so the
+      # Home Assistant slider animates live instead of jumping straight from
+      # the start position to the end position when the move completes.
+      - while:
+          condition:
+            lambda: 'return (millis() - id(cov_move_start_ms)[1]) < id(cov_move_ms)[1];'
+          then:
+            - delay: 1000ms
+            - lambda: |-
+                uint32_t elapsed = millis() - id(cov_move_start_ms)[1];
+                float frac = (float) elapsed / (float) id(cov_move_ms)[1];
+                if (frac > 1.0f) frac = 1.0f;
+                float from = id(cov_move_from)[1], to = id(cov_move_target)[1];
+                id(cov_pos_1) = from + (to - from) * frac;
+            - cover.template.publish:
+                id: persiana_dormitorio
+                position: !lambda 'return id(cov_pos_1);'
       - lambda: |-
           id(cov_pos_1) = id(cov_move_target)[1];
           id(cov_op)[1] = 0;
@@ -1629,7 +1661,23 @@ script:
           cover: 2
           cmd: !lambda 'return id(cov_op)[2] == 1 ? 0 : 1;'
       - script.wait: cover_cmd
-      - delay: !lambda 'return id(cov_move_ms)[2];'
+      # Republish an interpolated position every second while moving, so the
+      # Home Assistant slider animates live instead of jumping straight from
+      # the start position to the end position when the move completes.
+      - while:
+          condition:
+            lambda: 'return (millis() - id(cov_move_start_ms)[2]) < id(cov_move_ms)[2];'
+          then:
+            - delay: 1000ms
+            - lambda: |-
+                uint32_t elapsed = millis() - id(cov_move_start_ms)[2];
+                float frac = (float) elapsed / (float) id(cov_move_ms)[2];
+                if (frac > 1.0f) frac = 1.0f;
+                float from = id(cov_move_from)[2], to = id(cov_move_target)[2];
+                id(cov_pos_2) = from + (to - from) * frac;
+            - cover.template.publish:
+                id: persiana_elia
+                position: !lambda 'return id(cov_pos_2);'
       - lambda: |-
           id(cov_pos_2) = id(cov_move_target)[2];
           id(cov_op)[2] = 0;
@@ -1680,7 +1728,23 @@ script:
           cover: 3
           cmd: !lambda 'return id(cov_op)[3] == 1 ? 0 : 1;'
       - script.wait: cover_cmd
-      - delay: !lambda 'return id(cov_move_ms)[3];'
+      # Republish an interpolated position every second while moving, so the
+      # Home Assistant slider animates live instead of jumping straight from
+      # the start position to the end position when the move completes.
+      - while:
+          condition:
+            lambda: 'return (millis() - id(cov_move_start_ms)[3]) < id(cov_move_ms)[3];'
+          then:
+            - delay: 1000ms
+            - lambda: |-
+                uint32_t elapsed = millis() - id(cov_move_start_ms)[3];
+                float frac = (float) elapsed / (float) id(cov_move_ms)[3];
+                if (frac > 1.0f) frac = 1.0f;
+                float from = id(cov_move_from)[3], to = id(cov_move_target)[3];
+                id(cov_pos_3) = from + (to - from) * frac;
+            - cover.template.publish:
+                id: persiana_sofia
+                position: !lambda 'return id(cov_pos_3);'
       - lambda: |-
           id(cov_pos_3) = id(cov_move_target)[3];
           id(cov_op)[3] = 0;
