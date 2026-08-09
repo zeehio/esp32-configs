@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.8.0"
+  project_version: "v3.9.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -51,6 +51,15 @@ esphome:
       - script.execute: seed_known_codes
       - script.wait: seed_known_codes
       - script.execute: rebuild_cover_cache
+      # Covers are restore_mode: NO_RESTORE (position lives in cov_pos, which
+      # intentionally does not persist across reboots - see its comment in
+      # globals), so publish the fresh 0.5 default explicitly. Without this
+      # each cover's position would be whatever its uninitialized internal
+      # field happens to read until the first real move.
+      - cover.template.publish: { id: persiana_sala, position: 0.5, current_operation: "IDLE" }
+      - cover.template.publish: { id: persiana_dormitorio, position: 0.5, current_operation: "IDLE" }
+      - cover.template.publish: { id: persiana_elia, position: 0.5, current_operation: "IDLE" }
+      - cover.template.publish: { id: persiana_sofia, position: 0.5, current_operation: "IDLE" }
   name: "${name}"
   friendly_name: "${friendly_name}"
   comment: "${device_description}"
@@ -161,6 +170,38 @@ globals:
     type: int
     restore_value: no
     initial_value: '-1'
+  # --- Hand-rolled cover position tracking (cover_move_1..4 in script:) ---
+  # Position estimate per cover (0.0 closed .. 1.0 open), and per-move
+  # bookkeeping used to interpolate it while moving and to freeze it
+  # correctly on Stop. Not restored across reboots on purpose: a position
+  # left over from before a reboot is no more trustworthy than a fresh 0.5
+  # guess, given this is already just an elapsed-time estimate with no real
+  # feedback - see the reliability discussion this session.
+  - id: cov_pos
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(4, 0.5f)'
+  # 0=idle, 1=opening, 2=closing
+  - id: cov_op
+    type: std::vector<int>
+    restore_value: no
+    initial_value: 'std::vector<int>(4, 0)'
+  - id: cov_move_from
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(4, 0.5f)'
+  - id: cov_move_target
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(4, 0.5f)'
+  - id: cov_move_start_ms
+    type: std::vector<uint32_t>
+    restore_value: no
+    initial_value: 'std::vector<uint32_t>(4, 0)'
+  - id: cov_move_ms
+    type: std::vector<uint32_t>
+    restore_value: no
+    initial_value: 'std::vector<uint32_t>(4, 0)'
   # RAM cache of the codes assigned to each cover action, indexed cover*3+action
   # (action 0=open 1=close 2=stop). Type 0 marks an unassigned entry. Rebuilt
   # from NVS at boot and whenever slots or assignments change, so matching a
@@ -873,64 +914,140 @@ select:
 # Covers built from learned slots: assign any slot as a cover's OPEN, CLOSE or
 # STOP with the config buttons, then the cover appears in Home Assistant as a
 # normal shutter with a position slider. Position is estimated from travel
-# time (set per cover below); there is no position feedback over RF. The
-# motors stop themselves at their limits, hence has_built_in_endstop.
+# time (set per cover below); there is no position feedback over RF.
+#
+# Hand-rolled with platform: template instead of ESPHome's stock time_based:
+# time_based's start_direction_() silently no-ops a repeated same-direction
+# request (e.g. pressing Open again while it still thinks it's opening),
+# which is correct for a cover with a real endstop signal but actively wrong
+# here - our only signal that a command landed at all is whether the shutter
+# moved, so every press must always retransmit. See cover_move_N in the
+# script: section below for the actual open/close/stop/position logic; the
+# motors stop themselves at their limits on a full open/close (no explicit
+# stop is sent then), matching time_based's has_built_in_endstop behavior.
 cover:
-  - platform: time_based
+  - platform: template
     name: "Persiana Sala"
     id: persiana_sala
     device_class: shutter
-    has_built_in_endstop: true
-    open_duration: 26.5s
-    close_duration: 25s
+    assumed_state: true
+    restore_mode: NO_RESTORE
     open_action:
-      - script.execute: { id: cover_cmd, cover: 0, cmd: 0 }
+      - script.execute: { id: cover_move_1, target: 1.0 }
     close_action:
-      - script.execute: { id: cover_cmd, cover: 0, cmd: 1 }
+      - script.execute: { id: cover_move_1, target: 0.0 }
+    position_action:
+      - script.execute: { id: cover_move_1, target: !lambda 'return pos;' }
     stop_action:
+      - script.stop: cover_move_1
+      - lambda: |-
+          if (id(cov_op)[0] != 0) {
+            uint32_t elapsed = millis() - id(cov_move_start_ms)[0];
+            float frac = id(cov_move_ms)[0] > 0 ? (float) elapsed / (float) id(cov_move_ms)[0] : 1.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            if (frac < 0.0f) frac = 0.0f;
+            float from = id(cov_move_from)[0], to = id(cov_move_target)[0];
+            id(cov_pos)[0] = from + (to - from) * frac;
+            id(cov_op)[0] = 0;
+          }
+      - cover.template.publish:
+          id: persiana_sala
+          position: !lambda 'return id(cov_pos)[0];'
+          current_operation: "IDLE"
       - script.execute: { id: cover_cmd, cover: 0, cmd: 2 }
-  - platform: time_based
+  - platform: template
     name: "Persiana Dormitorio"
     id: persiana_dormitorio
     device_class: shutter
-    has_built_in_endstop: true
-    open_duration: 18.5s
-    close_duration: 18.5s
+    assumed_state: true
+    restore_mode: NO_RESTORE
     open_action:
-      - script.execute: { id: cover_cmd, cover: 1, cmd: 0 }
+      - script.execute: { id: cover_move_2, target: 1.0 }
     close_action:
-      - script.execute: { id: cover_cmd, cover: 1, cmd: 1 }
+      - script.execute: { id: cover_move_2, target: 0.0 }
+    position_action:
+      - script.execute: { id: cover_move_2, target: !lambda 'return pos;' }
     stop_action:
+      - script.stop: cover_move_2
+      - lambda: |-
+          if (id(cov_op)[1] != 0) {
+            uint32_t elapsed = millis() - id(cov_move_start_ms)[1];
+            float frac = id(cov_move_ms)[1] > 0 ? (float) elapsed / (float) id(cov_move_ms)[1] : 1.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            if (frac < 0.0f) frac = 0.0f;
+            float from = id(cov_move_from)[1], to = id(cov_move_target)[1];
+            id(cov_pos)[1] = from + (to - from) * frac;
+            id(cov_op)[1] = 0;
+          }
+      - cover.template.publish:
+          id: persiana_dormitorio
+          position: !lambda 'return id(cov_pos)[1];'
+          current_operation: "IDLE"
       - script.execute: { id: cover_cmd, cover: 1, cmd: 2 }
-  - platform: time_based
+  - platform: template
     name: "Persiana Elia"
     id: persiana_elia
     device_class: shutter
-    has_built_in_endstop: true
-    open_duration: 15.7s
-    close_duration: 15.7s
+    assumed_state: true
+    restore_mode: NO_RESTORE
     open_action:
-      - script.execute: { id: cover_cmd, cover: 2, cmd: 0 }
+      - script.execute: { id: cover_move_3, target: 1.0 }
     close_action:
-      - script.execute: { id: cover_cmd, cover: 2, cmd: 1 }
+      - script.execute: { id: cover_move_3, target: 0.0 }
+    position_action:
+      - script.execute: { id: cover_move_3, target: !lambda 'return pos;' }
     stop_action:
+      - script.stop: cover_move_3
+      - lambda: |-
+          if (id(cov_op)[2] != 0) {
+            uint32_t elapsed = millis() - id(cov_move_start_ms)[2];
+            float frac = id(cov_move_ms)[2] > 0 ? (float) elapsed / (float) id(cov_move_ms)[2] : 1.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            if (frac < 0.0f) frac = 0.0f;
+            float from = id(cov_move_from)[2], to = id(cov_move_target)[2];
+            id(cov_pos)[2] = from + (to - from) * frac;
+            id(cov_op)[2] = 0;
+          }
+      - cover.template.publish:
+          id: persiana_elia
+          position: !lambda 'return id(cov_pos)[2];'
+          current_operation: "IDLE"
       - script.execute: { id: cover_cmd, cover: 2, cmd: 2 }
-  - platform: time_based
+  - platform: template
     name: "Persiana Sofia"
     id: persiana_sofia
     device_class: shutter
-    has_built_in_endstop: true
-    open_duration: 16s
-    close_duration: 16s
+    assumed_state: true
+    restore_mode: NO_RESTORE
     open_action:
-      - script.execute: { id: cover_cmd, cover: 3, cmd: 0 }
+      - script.execute: { id: cover_move_4, target: 1.0 }
     close_action:
-      - script.execute: { id: cover_cmd, cover: 3, cmd: 1 }
+      - script.execute: { id: cover_move_4, target: 0.0 }
+    position_action:
+      - script.execute: { id: cover_move_4, target: !lambda 'return pos;' }
     stop_action:
+      - script.stop: cover_move_4
+      - lambda: |-
+          if (id(cov_op)[3] != 0) {
+            uint32_t elapsed = millis() - id(cov_move_start_ms)[3];
+            float frac = id(cov_move_ms)[3] > 0 ? (float) elapsed / (float) id(cov_move_ms)[3] : 1.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            if (frac < 0.0f) frac = 0.0f;
+            float from = id(cov_move_from)[3], to = id(cov_move_target)[3];
+            id(cov_pos)[3] = from + (to - from) * frac;
+            id(cov_op)[3] = 0;
+          }
+      - cover.template.publish:
+          id: persiana_sofia
+          position: !lambda 'return id(cov_pos)[3];'
+          current_operation: "IDLE"
       - script.execute: { id: cover_cmd, cover: 3, cmd: 2 }
 
-# Travel times for the time-based position estimate. Restored on boot; the
-# on_value applies them to the running cover, so no reflash is needed to tune.
+# Travel times used by cover_move_N (script: section) to compute how long
+# to run each move. Restored on boot (restore_value: true); read live via
+# .state each time a move starts, so no reflash is needed to tune - and no
+# push-to-cover step is needed either, since these covers aren't backed by
+# a component with its own duration fields (see the cover: section).
 number:
   - platform: template
     name: "RF Cover 1 Open Duration"
@@ -944,8 +1061,6 @@ number:
     step: 0.5
     unit_of_measurement: "s"
     mode: box
-    on_value:
-      - lambda: 'id(persiana_sala).set_open_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 1 Close Duration"
     id: rf_cover_1_close_s
@@ -958,8 +1073,6 @@ number:
     step: 0.5
     unit_of_measurement: "s"
     mode: box
-    on_value:
-      - lambda: 'id(persiana_sala).set_close_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 2 Open Duration"
     id: rf_cover_2_open_s
@@ -972,8 +1085,6 @@ number:
     step: 0.5
     unit_of_measurement: "s"
     mode: box
-    on_value:
-      - lambda: 'id(persiana_dormitorio).set_open_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 2 Close Duration"
     id: rf_cover_2_close_s
@@ -986,8 +1097,6 @@ number:
     step: 0.5
     unit_of_measurement: "s"
     mode: box
-    on_value:
-      - lambda: 'id(persiana_dormitorio).set_close_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 3 Open Duration"
     id: rf_cover_3_open_s
@@ -1000,8 +1109,6 @@ number:
     step: 0.5
     unit_of_measurement: "s"
     mode: box
-    on_value:
-      - lambda: 'id(persiana_elia).set_open_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 3 Close Duration"
     id: rf_cover_3_close_s
@@ -1014,8 +1121,6 @@ number:
     step: 0.5
     unit_of_measurement: "s"
     mode: box
-    on_value:
-      - lambda: 'id(persiana_elia).set_close_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 4 Open Duration"
     id: rf_cover_4_open_s
@@ -1028,8 +1133,6 @@ number:
     step: 0.5
     unit_of_measurement: "s"
     mode: box
-    on_value:
-      - lambda: 'id(persiana_sofia).set_open_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 4 Close Duration"
     id: rf_cover_4_close_s
@@ -1042,8 +1145,6 @@ number:
     step: 0.5
     unit_of_measurement: "s"
     mode: box
-    on_value:
-      - lambda: 'id(persiana_sofia).set_close_duration((uint32_t) (x * 1000.0f));'
 
   - platform: template
     name: "A-OK Repeats"
@@ -1367,6 +1468,210 @@ script:
           else if (a == 1) call.set_command_close();
           else call.set_command_stop();
           call.perform();
+
+  # Drives Persiana Sala through an open/close/position move: transmits the RF
+  # command immediately and unconditionally every time via cover_cmd - no
+  # internal guard, unlike ESPHome's stock time_based platform - then
+  # estimates position by elapsed time. mode: restart means a repeated press,
+  # even mid-move, cancels the previous timer outright (its delayed finalize
+  # step never runs) and starts a fresh one: the RF command still goes out
+  # again immediately, and the interrupted move's last estimated position
+  # becomes the new move's starting point.
+  - id: cover_move_1
+    mode: restart
+    parameters:
+      target: float
+    then:
+      - lambda: |-
+          float cur = id(cov_pos)[0];
+          bool opening = target >= cur;
+          float span = fabsf(target - cur);
+          // A same-position "resend" (e.g. pressing Open while already at
+          // 1.0) has span=0; floor it so the command still gets airtime
+          // instead of computing a zero-length, no-op move.
+          if (span < 0.05f) span = 0.05f;
+          float full_s = opening ? id(rf_cover_1_open_s).state : id(rf_cover_1_close_s).state;
+          id(cov_op)[0] = opening ? 1 : 2;
+          id(cov_move_from)[0] = cur;
+          id(cov_move_target)[0] = target;
+          id(cov_move_start_ms)[0] = millis();
+          id(cov_move_ms)[0] = (uint32_t) (span * full_s * 1000.0f);
+      - cover.template.publish:
+          id: persiana_sala
+          current_operation: !lambda |-
+            return id(cov_op)[0] == 1 ? esphome::cover::COVER_OPERATION_OPENING
+                                          : esphome::cover::COVER_OPERATION_CLOSING;
+      - script.execute:
+          id: cover_cmd
+          cover: 0
+          cmd: !lambda 'return id(cov_op)[0] == 1 ? 0 : 1;'
+      - script.wait: cover_cmd
+      - delay: !lambda 'return id(cov_move_ms)[0];'
+      - lambda: |-
+          id(cov_pos)[0] = id(cov_move_target)[0];
+          id(cov_op)[0] = 0;
+      - cover.template.publish:
+          id: persiana_sala
+          position: !lambda 'return id(cov_pos)[0];'
+          current_operation: "IDLE"
+      - if:
+          condition:
+            lambda: 'return id(cov_move_target)[0] > 0.001f && id(cov_move_target)[0] < 0.999f;'
+          then:
+            - script.execute: { id: cover_cmd, cover: 0, cmd: 2 }
+
+  # Drives Persiana Dormitorio through an open/close/position move: transmits the RF
+  # command immediately and unconditionally every time via cover_cmd - no
+  # internal guard, unlike ESPHome's stock time_based platform - then
+  # estimates position by elapsed time. mode: restart means a repeated press,
+  # even mid-move, cancels the previous timer outright (its delayed finalize
+  # step never runs) and starts a fresh one: the RF command still goes out
+  # again immediately, and the interrupted move's last estimated position
+  # becomes the new move's starting point.
+  - id: cover_move_2
+    mode: restart
+    parameters:
+      target: float
+    then:
+      - lambda: |-
+          float cur = id(cov_pos)[1];
+          bool opening = target >= cur;
+          float span = fabsf(target - cur);
+          // A same-position "resend" (e.g. pressing Open while already at
+          // 1.0) has span=0; floor it so the command still gets airtime
+          // instead of computing a zero-length, no-op move.
+          if (span < 0.05f) span = 0.05f;
+          float full_s = opening ? id(rf_cover_2_open_s).state : id(rf_cover_2_close_s).state;
+          id(cov_op)[1] = opening ? 1 : 2;
+          id(cov_move_from)[1] = cur;
+          id(cov_move_target)[1] = target;
+          id(cov_move_start_ms)[1] = millis();
+          id(cov_move_ms)[1] = (uint32_t) (span * full_s * 1000.0f);
+      - cover.template.publish:
+          id: persiana_dormitorio
+          current_operation: !lambda |-
+            return id(cov_op)[1] == 1 ? esphome::cover::COVER_OPERATION_OPENING
+                                          : esphome::cover::COVER_OPERATION_CLOSING;
+      - script.execute:
+          id: cover_cmd
+          cover: 1
+          cmd: !lambda 'return id(cov_op)[1] == 1 ? 0 : 1;'
+      - script.wait: cover_cmd
+      - delay: !lambda 'return id(cov_move_ms)[1];'
+      - lambda: |-
+          id(cov_pos)[1] = id(cov_move_target)[1];
+          id(cov_op)[1] = 0;
+      - cover.template.publish:
+          id: persiana_dormitorio
+          position: !lambda 'return id(cov_pos)[1];'
+          current_operation: "IDLE"
+      - if:
+          condition:
+            lambda: 'return id(cov_move_target)[1] > 0.001f && id(cov_move_target)[1] < 0.999f;'
+          then:
+            - script.execute: { id: cover_cmd, cover: 1, cmd: 2 }
+
+  # Drives Persiana Elia through an open/close/position move: transmits the RF
+  # command immediately and unconditionally every time via cover_cmd - no
+  # internal guard, unlike ESPHome's stock time_based platform - then
+  # estimates position by elapsed time. mode: restart means a repeated press,
+  # even mid-move, cancels the previous timer outright (its delayed finalize
+  # step never runs) and starts a fresh one: the RF command still goes out
+  # again immediately, and the interrupted move's last estimated position
+  # becomes the new move's starting point.
+  - id: cover_move_3
+    mode: restart
+    parameters:
+      target: float
+    then:
+      - lambda: |-
+          float cur = id(cov_pos)[2];
+          bool opening = target >= cur;
+          float span = fabsf(target - cur);
+          // A same-position "resend" (e.g. pressing Open while already at
+          // 1.0) has span=0; floor it so the command still gets airtime
+          // instead of computing a zero-length, no-op move.
+          if (span < 0.05f) span = 0.05f;
+          float full_s = opening ? id(rf_cover_3_open_s).state : id(rf_cover_3_close_s).state;
+          id(cov_op)[2] = opening ? 1 : 2;
+          id(cov_move_from)[2] = cur;
+          id(cov_move_target)[2] = target;
+          id(cov_move_start_ms)[2] = millis();
+          id(cov_move_ms)[2] = (uint32_t) (span * full_s * 1000.0f);
+      - cover.template.publish:
+          id: persiana_elia
+          current_operation: !lambda |-
+            return id(cov_op)[2] == 1 ? esphome::cover::COVER_OPERATION_OPENING
+                                          : esphome::cover::COVER_OPERATION_CLOSING;
+      - script.execute:
+          id: cover_cmd
+          cover: 2
+          cmd: !lambda 'return id(cov_op)[2] == 1 ? 0 : 1;'
+      - script.wait: cover_cmd
+      - delay: !lambda 'return id(cov_move_ms)[2];'
+      - lambda: |-
+          id(cov_pos)[2] = id(cov_move_target)[2];
+          id(cov_op)[2] = 0;
+      - cover.template.publish:
+          id: persiana_elia
+          position: !lambda 'return id(cov_pos)[2];'
+          current_operation: "IDLE"
+      - if:
+          condition:
+            lambda: 'return id(cov_move_target)[2] > 0.001f && id(cov_move_target)[2] < 0.999f;'
+          then:
+            - script.execute: { id: cover_cmd, cover: 2, cmd: 2 }
+
+  # Drives Persiana Sofia through an open/close/position move: transmits the RF
+  # command immediately and unconditionally every time via cover_cmd - no
+  # internal guard, unlike ESPHome's stock time_based platform - then
+  # estimates position by elapsed time. mode: restart means a repeated press,
+  # even mid-move, cancels the previous timer outright (its delayed finalize
+  # step never runs) and starts a fresh one: the RF command still goes out
+  # again immediately, and the interrupted move's last estimated position
+  # becomes the new move's starting point.
+  - id: cover_move_4
+    mode: restart
+    parameters:
+      target: float
+    then:
+      - lambda: |-
+          float cur = id(cov_pos)[3];
+          bool opening = target >= cur;
+          float span = fabsf(target - cur);
+          // A same-position "resend" (e.g. pressing Open while already at
+          // 1.0) has span=0; floor it so the command still gets airtime
+          // instead of computing a zero-length, no-op move.
+          if (span < 0.05f) span = 0.05f;
+          float full_s = opening ? id(rf_cover_4_open_s).state : id(rf_cover_4_close_s).state;
+          id(cov_op)[3] = opening ? 1 : 2;
+          id(cov_move_from)[3] = cur;
+          id(cov_move_target)[3] = target;
+          id(cov_move_start_ms)[3] = millis();
+          id(cov_move_ms)[3] = (uint32_t) (span * full_s * 1000.0f);
+      - cover.template.publish:
+          id: persiana_sofia
+          current_operation: !lambda |-
+            return id(cov_op)[3] == 1 ? esphome::cover::COVER_OPERATION_OPENING
+                                          : esphome::cover::COVER_OPERATION_CLOSING;
+      - script.execute:
+          id: cover_cmd
+          cover: 3
+          cmd: !lambda 'return id(cov_op)[3] == 1 ? 0 : 1;'
+      - script.wait: cover_cmd
+      - delay: !lambda 'return id(cov_move_ms)[3];'
+      - lambda: |-
+          id(cov_pos)[3] = id(cov_move_target)[3];
+          id(cov_op)[3] = 0;
+      - cover.template.publish:
+          id: persiana_sofia
+          position: !lambda 'return id(cov_pos)[3];'
+          current_operation: "IDLE"
+      - if:
+          condition:
+            lambda: 'return id(cov_move_target)[3] > 0.001f && id(cov_move_target)[3] < 0.999f;'
+          then:
+            - script.execute: { id: cover_cmd, cover: 3, cmd: 2 }
 
   # Plays the slot mapped to a cover action. cover is 0-3; cmd is 0=open,
   # 1=close, 2=stop. The mapping is fixed at build time (see the identical
