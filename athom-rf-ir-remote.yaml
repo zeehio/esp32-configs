@@ -894,7 +894,7 @@ select:
 cover:
   - platform: time_based
     name: "Persiana Sala"
-    id: rf_cover_1
+    id: persiana_sala
     device_class: shutter
     has_built_in_endstop: true
     open_duration: 26.5s
@@ -907,7 +907,7 @@ cover:
       - script.execute: { id: cover_cmd, cover: 0, cmd: 2 }
   - platform: time_based
     name: "Persiana Dormitorio"
-    id: rf_cover_2
+    id: persiana_dormitorio
     device_class: shutter
     has_built_in_endstop: true
     open_duration: 18.5s
@@ -920,7 +920,7 @@ cover:
       - script.execute: { id: cover_cmd, cover: 1, cmd: 2 }
   - platform: time_based
     name: "Persiana Elia"
-    id: rf_cover_3
+    id: persiana_elia
     device_class: shutter
     has_built_in_endstop: true
     open_duration: 15.7s
@@ -933,7 +933,7 @@ cover:
       - script.execute: { id: cover_cmd, cover: 2, cmd: 2 }
   - platform: time_based
     name: "Persiana Sofia"
-    id: rf_cover_4
+    id: persiana_sofia
     device_class: shutter
     has_built_in_endstop: true
     open_duration: 16s
@@ -961,7 +961,7 @@ number:
     unit_of_measurement: "s"
     mode: box
     on_value:
-      - lambda: 'id(rf_cover_1).set_open_duration((uint32_t) (x * 1000.0f));'
+      - lambda: 'id(persiana_sala).set_open_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 1 Close Duration"
     id: rf_cover_1_close_s
@@ -975,7 +975,7 @@ number:
     unit_of_measurement: "s"
     mode: box
     on_value:
-      - lambda: 'id(rf_cover_1).set_close_duration((uint32_t) (x * 1000.0f));'
+      - lambda: 'id(persiana_sala).set_close_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 2 Open Duration"
     id: rf_cover_2_open_s
@@ -989,7 +989,7 @@ number:
     unit_of_measurement: "s"
     mode: box
     on_value:
-      - lambda: 'id(rf_cover_2).set_open_duration((uint32_t) (x * 1000.0f));'
+      - lambda: 'id(persiana_dormitorio).set_open_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 2 Close Duration"
     id: rf_cover_2_close_s
@@ -1003,7 +1003,7 @@ number:
     unit_of_measurement: "s"
     mode: box
     on_value:
-      - lambda: 'id(rf_cover_2).set_close_duration((uint32_t) (x * 1000.0f));'
+      - lambda: 'id(persiana_dormitorio).set_close_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 3 Open Duration"
     id: rf_cover_3_open_s
@@ -1017,7 +1017,7 @@ number:
     unit_of_measurement: "s"
     mode: box
     on_value:
-      - lambda: 'id(rf_cover_3).set_open_duration((uint32_t) (x * 1000.0f));'
+      - lambda: 'id(persiana_elia).set_open_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 3 Close Duration"
     id: rf_cover_3_close_s
@@ -1031,7 +1031,7 @@ number:
     unit_of_measurement: "s"
     mode: box
     on_value:
-      - lambda: 'id(rf_cover_3).set_close_duration((uint32_t) (x * 1000.0f));'
+      - lambda: 'id(persiana_elia).set_close_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 4 Open Duration"
     id: rf_cover_4_open_s
@@ -1045,7 +1045,7 @@ number:
     unit_of_measurement: "s"
     mode: box
     on_value:
-      - lambda: 'id(rf_cover_4).set_open_duration((uint32_t) (x * 1000.0f));'
+      - lambda: 'id(persiana_sofia).set_open_duration((uint32_t) (x * 1000.0f));'
   - platform: template
     name: "RF Cover 4 Close Duration"
     id: rf_cover_4_close_s
@@ -1059,7 +1059,7 @@ number:
     unit_of_measurement: "s"
     mode: box
     on_value:
-      - lambda: 'id(rf_cover_4).set_close_duration((uint32_t) (x * 1000.0f));'
+      - lambda: 'id(persiana_sofia).set_close_duration((uint32_t) (x * 1000.0f));'
 
   - platform: template
     name: "A-OK Repeats"
@@ -1322,7 +1322,7 @@ script:
             id(ha_event).execute(std::string(b));
           }
           id(rf_echo_until) = now + 800;
-          cover::Cover *covers[4] = {id(rf_cover_1), id(rf_cover_2), id(rf_cover_3), id(rf_cover_4)};
+          cover::Cover *covers[4] = {id(persiana_sala), id(persiana_dormitorio), id(persiana_elia), id(persiana_sofia)};
           auto call = covers[c]->make_call();
           if (a == 0) call.set_command_open();
           else if (a == 1) call.set_command_close();
