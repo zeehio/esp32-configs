@@ -893,12 +893,12 @@ select:
 # motors stop themselves at their limits, hence has_built_in_endstop.
 cover:
   - platform: time_based
-    name: "RF Cover 1"
+    name: "Persiana Sala"
     id: rf_cover_1
     device_class: shutter
     has_built_in_endstop: true
-    open_duration: 30s
-    close_duration: 30s
+    open_duration: 26.5s
+    close_duration: 25s
     open_action:
       - script.execute: { id: cover_cmd, cover: 0, cmd: 0 }
     close_action:
@@ -906,12 +906,12 @@ cover:
     stop_action:
       - script.execute: { id: cover_cmd, cover: 0, cmd: 2 }
   - platform: time_based
-    name: "RF Cover 2"
+    name: "Persiana Dormitorio"
     id: rf_cover_2
     device_class: shutter
     has_built_in_endstop: true
-    open_duration: 30s
-    close_duration: 30s
+    open_duration: 18.5s
+    close_duration: 18.5s
     open_action:
       - script.execute: { id: cover_cmd, cover: 1, cmd: 0 }
     close_action:
@@ -919,12 +919,12 @@ cover:
     stop_action:
       - script.execute: { id: cover_cmd, cover: 1, cmd: 2 }
   - platform: time_based
-    name: "RF Cover 3"
+    name: "Persiana Elia"
     id: rf_cover_3
     device_class: shutter
     has_built_in_endstop: true
-    open_duration: 30s
-    close_duration: 30s
+    open_duration: 15.7s
+    close_duration: 15.7s
     open_action:
       - script.execute: { id: cover_cmd, cover: 2, cmd: 0 }
     close_action:
@@ -932,12 +932,12 @@ cover:
     stop_action:
       - script.execute: { id: cover_cmd, cover: 2, cmd: 2 }
   - platform: time_based
-    name: "RF Cover 4"
+    name: "Persiana Sofia"
     id: rf_cover_4
     device_class: shutter
     has_built_in_endstop: true
-    open_duration: 30s
-    close_duration: 30s
+    open_duration: 16s
+    close_duration: 16s
     open_action:
       - script.execute: { id: cover_cmd, cover: 3, cmd: 0 }
     close_action:
@@ -954,7 +954,7 @@ number:
     entity_category: config
     optimistic: true
     restore_value: true
-    initial_value: 30
+    initial_value: 26.5
     min_value: 1
     max_value: 120
     step: 0.5
@@ -968,7 +968,7 @@ number:
     entity_category: config
     optimistic: true
     restore_value: true
-    initial_value: 30
+    initial_value: 25
     min_value: 1
     max_value: 120
     step: 0.5
@@ -982,7 +982,7 @@ number:
     entity_category: config
     optimistic: true
     restore_value: true
-    initial_value: 30
+    initial_value: 18.5
     min_value: 1
     max_value: 120
     step: 0.5
@@ -996,7 +996,7 @@ number:
     entity_category: config
     optimistic: true
     restore_value: true
-    initial_value: 30
+    initial_value: 18.5
     min_value: 1
     max_value: 120
     step: 0.5
@@ -1010,7 +1010,7 @@ number:
     entity_category: config
     optimistic: true
     restore_value: true
-    initial_value: 30
+    initial_value: 15.7
     min_value: 1
     max_value: 120
     step: 0.5
@@ -1024,7 +1024,7 @@ number:
     entity_category: config
     optimistic: true
     restore_value: true
-    initial_value: 30
+    initial_value: 15.7
     min_value: 1
     max_value: 120
     step: 0.5
@@ -1038,7 +1038,7 @@ number:
     entity_category: config
     optimistic: true
     restore_value: true
-    initial_value: 30
+    initial_value: 16
     min_value: 1
     max_value: 120
     step: 0.5
@@ -1052,7 +1052,7 @@ number:
     entity_category: config
     optimistic: true
     restore_value: true
-    initial_value: 30
+    initial_value: 16
     min_value: 1
     max_value: 120
     step: 0.5
