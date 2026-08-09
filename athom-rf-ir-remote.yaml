@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.7.1"
+  project_version: "v3.8.0"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -48,6 +48,8 @@ esphome:
       - lambda: |-
           ESP_LOGW("BUILD", "running ${project_version}");
           id(ha_event).execute(std::string("Booted ${project_version}"));
+      - script.execute: seed_known_codes
+      - script.wait: seed_known_codes
       - script.execute: rebuild_cover_cache
   name: "${name}"
   friendly_name: "${friendly_name}"
@@ -1166,6 +1168,61 @@ script:
           data:
             name: "RF433"
             message: !lambda 'return msg;'
+
+  # Repopulates the 12 cover slots with known-good codes if a slot is EMPTY -
+  # notably after the "Factory Reset" button, which calls ESP-IDF's
+  # nvs_flash_erase() and wipes the entire NVS partition (every namespace,
+  # not just ESPHome's own preferences), taking every learned RF/IR code with
+  # it. Runs once at boot, before rebuild_cover_cache, so a seeded slot is
+  # live immediately with no second reboot needed.
+  #
+  # Never overwrites a slot that already holds data: re-learning from the
+  # physical remote (which is definitionally the ground truth for what that
+  # remote actually transmits) always takes precedence over this fallback.
+  # These 12 values were captured and checksum-verified against the real
+  # remotes this session - see PROTOCOLS.md / the conversation history for
+  # how; they are specific to this household's four covers, not a generic
+  # default appropriate for a different installation.
+  - id: seed_known_codes
+    mode: queued
+    then:
+      - lambda: |-
+          struct Seed { int slot; int type; uint32_t hi; uint32_t lo; const char *label; };
+          static const Seed SEEDS[12] = {
+              // Persiana Sala (Dooya, id=0xC089B7 channel=5)
+              {10, -1, 0x000000C0u, 0x89B70511u, "Sala open"},
+              {11, -1, 0x000000C0u, 0x89B70555u, "Sala stop"},
+              {12, -1, 0x000000C0u, 0x89B70533u, "Sala close"},
+              // Persiana Dormitorio (Dooya, id=0xC389EB channel=5)
+              {13, -1, 0x000000C3u, 0x89EB0511u, "Dormitorio open"},
+              {14, -1, 0x000000C3u, 0x89EB0555u, "Dormitorio stop"},
+              {15, -1, 0x000000C3u, 0x89EB0533u, "Dormitorio close"},
+              // Persiana Elia (A-OK, id=0xC86E2C address=0x0200)
+              {16, -2, 0xA3C86E2Cu, 0x02000B6Fu, "Elia open"},
+              {17, -2, 0xA3C86E2Cu, 0x02002387u, "Elia stop"},
+              {18, -2, 0xA3C86E2Cu, 0x020043A7u, "Elia close"},
+              // Persiana Sofia (A-OK, id=0xC86E2C address=0x0100)
+              {19, -2, 0xA3C86E2Cu, 0x01000B6Eu, "Sofia open"},
+              {20, -2, 0xA3C86E2Cu, 0x01002386u, "Sofia stop"},
+              {21, -2, 0xA3C86E2Cu, 0x010043A6u, "Sofia close"},
+          };
+          int seeded = 0;
+          for (int i = 0; i < 12; i++) {
+            std::vector<int> existing = id(signal_nvs).load_from_nvs<int>(SEEDS[i].slot);
+            if (existing.size() >= 3) continue;  // already learned - leave it alone
+            std::vector<int> d;
+            d.push_back(SEEDS[i].type);
+            d.push_back((int) SEEDS[i].hi);
+            d.push_back((int) SEEDS[i].lo);
+            id(signal_nvs).save_to_nvs(SEEDS[i].slot, d);
+            ESP_LOGW("RF_SEED", "Slot %d (%s) was empty - seeded with known code", SEEDS[i].slot, SEEDS[i].label);
+            seeded++;
+          }
+          if (seeded > 0) {
+            char eb[64];
+            snprintf(eb, sizeof(eb), "Seeded %d empty cover slot(s) with known codes", seeded);
+            id(ha_event).execute(std::string(eb));
+          }
 
   # Rebuilds the RAM cache of cover-assigned codes from the hardcoded slot map
   # below. Runs at boot and after anything that can change a slot's contents
