@@ -162,11 +162,6 @@ globals:
     type: int
     restore_value: yes
     initial_value: '5030'
-  # Which RF Cover (0-3) the assignment buttons act on
-  - id: cover_select_index
-    type: int
-    restore_value: yes
-    initial_value: '0'
   # Slot resolved by cover_cmd for the current action; -1 when unassigned
   - id: cover_tmp_slot
     type: int
@@ -694,51 +689,6 @@ button:
           id(rf_status_text).publish_state("Slot cleared");
       - script.execute: rebuild_cover_cache
 
-  # Cover assignment: pick the cover in "RF Cover Config", select a learned
-  # slot in "RF Signal Slot", then press one of these to wire that slot to the
-  # cover's action. The mapping is stored in NVS and survives reboots.
-  - platform: template
-    name: "Cover assign slot as OPEN"
-    icon: mdi:arrow-up-bold-box
-    entity_category: config
-    on_press:
-      - lambda: |-
-          int c = id(cover_select_index);
-          std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
-          if (m.size() < 3) m = {-1, -1, -1};
-          m[0] = id(rf_signal_select_index);
-          id(signal_nvs).save_to_nvs(200 + c, m);
-          ESP_LOGI("RF_COVER", "Cover %d OPEN = slot %d", c + 1, m[0]);
-          id(rf_status_text).publish_state("Cover OPEN assigned");
-      - script.execute: rebuild_cover_cache
-  - platform: template
-    name: "Cover assign slot as CLOSE"
-    icon: mdi:arrow-down-bold-box
-    entity_category: config
-    on_press:
-      - lambda: |-
-          int c = id(cover_select_index);
-          std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
-          if (m.size() < 3) m = {-1, -1, -1};
-          m[1] = id(rf_signal_select_index);
-          id(signal_nvs).save_to_nvs(200 + c, m);
-          ESP_LOGI("RF_COVER", "Cover %d CLOSE = slot %d", c + 1, m[1]);
-          id(rf_status_text).publish_state("Cover CLOSE assigned");
-      - script.execute: rebuild_cover_cache
-  - platform: template
-    name: "Cover assign slot as STOP"
-    icon: mdi:stop-circle-outline
-    entity_category: config
-    on_press:
-      - lambda: |-
-          int c = id(cover_select_index);
-          std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
-          if (m.size() < 3) m = {-1, -1, -1};
-          m[2] = id(rf_signal_select_index);
-          id(signal_nvs).save_to_nvs(200 + c, m);
-          ESP_LOGI("RF_COVER", "Cover %d STOP = slot %d", c + 1, m[2]);
-          id(rf_status_text).publish_state("Cover STOP assigned");
-      - script.execute: rebuild_cover_cache
 
 light:
   - platform: status_led
@@ -921,23 +871,6 @@ select:
           else if (x == "Signal 14") id(rf_signal_select_index) = 24;
           else if (x == "Signal 15") id(rf_signal_select_index) = 25;
           ESP_LOGI("RF_LEARNING", "Selected slot: %d", id(rf_signal_select_index));
-
-  # Which RF Cover the three "Cover: assign" buttons act on
-  - platform: template
-    name: "RF Cover Config"
-    id: rf_cover_select
-    optimistic: true
-    entity_category: config
-    options:
-      - "Cover 1"
-      - "Cover 2"
-      - "Cover 3"
-      - "Cover 4"
-    initial_option: "Cover 1"
-    on_value:
-      - lambda: |-
-          id(cover_select_index) = (int) i;
-          ESP_LOGI("RF_COVER", "Configuring cover %d", (int) i + 1);
 
   - platform: template
     name: "A-OK Timing Preset"
@@ -1252,61 +1185,66 @@ script:
             name: "RF433"
             message: !lambda 'return msg;'
 
-  # Rebuilds the RAM cache of cover-assigned codes from NVS. Runs at boot and
-  # after anything that can change an assignment or a slot's contents.
+  # Rebuilds the RAM cache of cover-assigned codes from the hardcoded slot map
+  # below. Runs at boot and after anything that can change a slot's contents
+  # (learning, clearing). There is no runtime assignment step any more - which
+  # slot backs which cover action is fixed at build time; only what's LEARNED
+  # into that slot can change, which is what this rebuild actually tracks.
   - id: rebuild_cover_cache
     mode: queued
     then:
       - lambda: |-
+          // Cover N action -> NVS slot. action 0=open 1=close 2=stop.
+          // Slots run 10-21: three consecutive slots per cover, in
+          // [open, stop, close] order on the "RF Signal Slot" selector -
+          // e.g. cover 1 is Signal 0/1/2 = slots 10/11/12 = open/stop/close.
+          static const int COVER_SLOTS[4][3] = {
+              {10, 12, 11},  // Cover 1: open=10 close=12 stop=11
+              {13, 15, 14},  // Cover 2: open=13 close=15 stop=14
+              {16, 18, 17},  // Cover 3: open=16 close=18 stop=17
+              {19, 21, 20},  // Cover 4: open=19 close=21 stop=20
+          };
+          static const char *ANAMES[3] = {"OPEN", "CLOSE", "STOP"};
+          static const char TAGC[3] = {'o', 'c', 's'};
           int assigned = 0;
-          for (int c = 0; c < 4; c++) {
-            std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
-            for (int a = 0; a < 3; a++) {
-              int idx = c * 3 + a;
-              id(cover_code_type)[idx] = 0;
-              id(cover_code_val)[idx] = 0;
-              if (m.size() < 3 || m[a] < 10) continue;
-              std::vector<int> d = id(signal_nvs).load_from_nvs<int>(m[a]);
-              if (d.size() < 3) continue;
-              id(cover_code_type)[idx] = d[0];
-              id(cover_code_val)[idx] = ((uint64_t) (uint32_t) d[1] << 32) | (uint32_t) d[2];
-              assigned++;
-              static const char *ANAMES[3] = {"OPEN", "CLOSE", "STOP"};
-              ESP_LOGI("RF_COVER", "  cover %d %-5s = slot %d  type=%d code=0x%016llX",
-                       c + 1, ANAMES[a], m[a], d[0],
-                       (unsigned long long) id(cover_code_val)[idx]);
-            }
-          }
-          ESP_LOGI("RF_COVER", "Cover code cache rebuilt: %d of 12 actions assigned", assigned);
           std::string sum;
           char sb[24];
-          static const char TAGC[3] = {'o', 'c', 's'};
           text_sensor::TextSensor *code_sensors[4] = {
               id(cover_1_codes), id(cover_2_codes), id(cover_3_codes), id(cover_4_codes)};
           for (int c = 0; c < 4; c++) {
-            std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + c);
             snprintf(sb, sizeof(sb), "%sC%d", c ? " | " : "", c + 1);
             sum += sb;
             std::string codes;
             for (int a = 0; a < 3; a++) {
-              bool have = m.size() >= 3 && m[a] >= 10;
-              if (have) snprintf(sb, sizeof(sb), " %c:%d", TAGC[a], m[a]);
-              else snprintf(sb, sizeof(sb), " %c:-", TAGC[a]);
-              sum += sb;
               int idx = c * 3 + a;
+              int slot = COVER_SLOTS[c][a];
+              std::vector<int> d = id(signal_nvs).load_from_nvs<int>(slot);
               char cb[28];
-              if (have && id(cover_code_type)[idx] != 0)
+              if (d.size() >= 3) {
+                id(cover_code_type)[idx] = d[0];
+                id(cover_code_val)[idx] = ((uint64_t) (uint32_t) d[1] << 32) | (uint32_t) d[2];
+                assigned++;
+                snprintf(sb, sizeof(sb), " %c:%d", TAGC[a], slot);
                 snprintf(cb, sizeof(cb), "%c:0x%016llX ", TAGC[a],
                          (unsigned long long) id(cover_code_val)[idx]);
-              else
+                ESP_LOGI("RF_COVER", "  cover %d %-5s = slot %d  type=%d code=0x%016llX",
+                         c + 1, ANAMES[a], slot, d[0], (unsigned long long) id(cover_code_val)[idx]);
+              } else {
+                id(cover_code_type)[idx] = 0;
+                id(cover_code_val)[idx] = 0;
+                snprintf(sb, sizeof(sb), " %c:%d!", TAGC[a], slot);
                 snprintf(cb, sizeof(cb), "%c:- ", TAGC[a]);
+                ESP_LOGW("RF_COVER", "  cover %d %-5s = slot %d  NOT YET LEARNED", c + 1, ANAMES[a], slot);
+              }
+              sum += sb;
               codes += cb;
             }
             code_sensors[c]->publish_state(codes);
           }
           id(cover_assign_text).publish_state(sum);
+          ESP_LOGI("RF_COVER", "Cover code cache rebuilt: %d of 12 slots learned", assigned);
           char eb[64];
-          snprintf(eb, sizeof(eb), "Cover cache: %d of 12 actions assigned", assigned);
+          snprintf(eb, sizeof(eb), "Cover cache: %d of 12 slots learned", assigned);
           id(ha_event).execute(std::string(eb));
 
   # A frame from a physical remote arrived (rx_type/rx_code). If it matches a
@@ -1386,9 +1324,11 @@ script:
           else call.set_command_stop();
           call.perform();
 
-  # Plays the slot assigned to a cover action. cover is 0-3; cmd is 0=open,
-  # 1=close, 2=stop. Mappings live at NVS index 200+cover as [open, close,
-  # stop] slot indices, -1 when unassigned.
+  # Plays the slot mapped to a cover action. cover is 0-3; cmd is 0=open,
+  # 1=close, 2=stop. The mapping is fixed at build time (see the identical
+  # COVER_SLOTS table in rebuild_cover_cache) - three consecutive slots per
+  # cover, [open, stop, close] order: cover 1 = slots 10/11/12, cover 2 =
+  # 13/14/15, cover 3 = 16/17/18, cover 4 = 19/20/21.
   - id: cover_cmd
     mode: queued
     parameters:
@@ -1396,6 +1336,8 @@ script:
       cmd: int
     then:
       - lambda: |-
+          static const int COVER_SLOTS[4][3] = {
+              {10, 12, 11}, {13, 15, 14}, {16, 18, 17}, {19, 21, 20}};
           static const char *CMDS[3] = {"OPEN", "CLOSE", "STOP"};
           // Command echoed from a physical remote press: the motor already
           // received it over the air, only the position estimate moves.
@@ -1404,15 +1346,16 @@ script:
             id(cover_tmp_slot) = -1;
             return;
           }
-          std::vector<int> m = id(signal_nvs).load_from_nvs<int>(200 + cover);
-          if (m.size() < 3 || m[cmd] < 10) {
-            ESP_LOGW("RF_COVER", "Cover %d has no slot assigned for %s", cover + 1, CMDS[cmd]);
-            id(rf_status_text).publish_state("Cover action not assigned");
+          int slot = COVER_SLOTS[cover][cmd];
+          std::vector<int> d = id(signal_nvs).load_from_nvs<int>(slot);
+          if (d.size() < 3) {
+            ESP_LOGW("RF_COVER", "Cover %d slot %d (%s) has no learned signal", cover + 1, slot, CMDS[cmd]);
+            id(rf_status_text).publish_state("Cover slot not learned yet");
             id(cover_tmp_slot) = -1;
             return;
           }
-          id(cover_tmp_slot) = m[cmd];
-          ESP_LOGI("RF_COVER", "Cover %d %s -> slot %d", cover + 1, CMDS[cmd], m[cmd]);
+          id(cover_tmp_slot) = slot;
+          ESP_LOGI("RF_COVER", "Cover %d %s -> slot %d", cover + 1, CMDS[cmd], slot);
       - if:
           condition:
             lambda: 'return id(cover_tmp_slot) >= 10;'
