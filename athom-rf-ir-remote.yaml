@@ -10,7 +10,7 @@ substitutions:
   # Project Name
   project_name: "China Athom Technology.Athom RF IR Remote"
   # Projection version denotes the release version of the yaml file, allowing checking of deployed vs latest version
-  project_version: "v3.7.0"
+  project_version: "v3.7.1"
   # Define a domain for this device to use. i.e. iot.home.lan (so device will appear as athom-smart-plug-v2.iot.home.lan in DNS/DHCP logs)
   dns_domain: ".local"
   # Set timezone of the smart plug. Useful if the plug is in a location different to the HA server. Can be entered in unix Country/Area format (i.e. "Australia/Sydney")
@@ -140,14 +140,6 @@ globals:
     type: int
     restore_value: yes
     initial_value: '0'
-  # The remote sends a second "AFTER UP/DOWN" burst (cmd 0x24) after every
-  # UP/DOWN command; playback has always reproduced that unconditionally.
-  # On by default to match existing behavior - disabling tests whether the
-  # motor actually needs it, halving airtime per direction command if not.
-  - id: rf_aok_followup
-    type: bool
-    restore_value: yes
-    initial_value: 'true'
   # akirjavainen/A-OK's REPEAT_COMMAND is 8; that has been this firmware's
   # fixed repeat count since the A-OK feature was added.
   - id: rf_aok_repeats
@@ -786,16 +778,6 @@ switch:
       - lambda: 'id(rf_aok_preamble) = true;'
     turn_off_action:
       - lambda: 'id(rf_aok_preamble) = false;'
-  - platform: template
-    name: "A-OK Send Follow-up (0x24)"
-    icon: mdi:repeat
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      - lambda: 'id(rf_aok_followup) = true;'
-    turn_off_action:
-      - lambda: 'id(rf_aok_followup) = false;'
 
 # Signal slot selector
 select:
@@ -1414,6 +1396,7 @@ script:
       # burst with cmd 0x24 ("after up/down" in akirjavainen/A-OK), so playback
       # reproduces that: same ID and address, cmd 0x24, checksum recomputed.
       # STOP and everything else is a single burst, exactly like the remote.
+      # Confirmed required in practice: without it, open/close don't register.
       - if:
           condition:
             lambda: 'return id(rf_tx_protocol) == -2;'
@@ -1424,7 +1407,7 @@ script:
                 condition:
                   lambda: |-
                     uint8_t cmd = (uint8_t) (id(rf_tx_code) >> 8);
-                    return id(rf_aok_followup) && (cmd == 0x0B || cmd == 0x43);
+                    return cmd == 0x0B || cmd == 0x43;
                 then:
                   - lambda: |-
                       uint64_t code = id(rf_tx_code);
